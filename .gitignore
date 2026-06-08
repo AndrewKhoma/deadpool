@@ -3,3 +3,6 @@
 **/target
 **/*.rs.bk
 Cargo.lock
+
+# PAW files
+.paw/

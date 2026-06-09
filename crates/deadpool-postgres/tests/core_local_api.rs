@@ -55,3 +55,26 @@ fn gateway_shaped_dual_pool_builds_with_fast_and_clean_recycling() {
     primary.retain(|_, _| true);
     timeout.retain(|_, _| true);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[tokio::test]
+async fn gateway_shaped_timeout_error_uses_core_local_pool() {
+    let mut cfg = deadpool_postgres::Config::new();
+    cfg.dbname = Some("deadpool".to_string());
+    let pool = cfg
+        .builder(deadpool_postgres::tokio_postgres::NoTls)
+        .unwrap()
+        .max_size(0)
+        .wait_timeout(Some(std::time::Duration::ZERO))
+        .runtime(deadpool_postgres::Runtime::Tokio1)
+        .pool_mode(deadpool_postgres::PoolMode::CoreLocal)
+        .build()
+        .unwrap();
+
+    let err = pool.local().get().await.unwrap_err();
+    assert!(matches!(
+        err,
+        deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait)
+    ));
+    assert_eq!(pool.status().waiting, 0);
+}

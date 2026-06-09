@@ -42,6 +42,19 @@ fn create_pool() -> Pool {
         .unwrap()
 }
 
+#[cfg(feature = "core-local")]
+fn create_core_local_pool(recycling_method: RecyclingMethod) -> Pool {
+    let mut cfg = Config::from_env();
+    cfg.pg.manager = Some(ManagerConfig { recycling_method });
+    cfg.pg
+        .builder(tokio_postgres::NoTls)
+        .unwrap()
+        .runtime(Runtime::Tokio1)
+        .pool_mode(deadpool_postgres::PoolMode::CoreLocal)
+        .build()
+        .unwrap()
+}
+
 #[tokio::test]
 async fn basic() {
     let pool = create_pool();
@@ -210,6 +223,37 @@ async fn statement_caches_clear() {
     pool.manager().statement_caches.clear();
     assert!(client0.statement_cache.size() == 0);
     assert!(client1.statement_cache.size() == 0);
+}
+
+#[cfg(feature = "core-local")]
+#[tokio::test]
+async fn core_local_cached_statement_lifecycle() {
+    let pool = create_core_local_pool(RecyclingMethod::Fast);
+    let local = pool.local();
+    let client = local.get().await.unwrap();
+    assert_eq!(client.statement_cache.size(), 0);
+    client.prepare_cached("SELECT 1;").await.unwrap();
+    assert_eq!(client.statement_cache.size(), 1);
+    client.statement_cache.clear();
+    assert_eq!(client.statement_cache.size(), 0);
+}
+
+#[cfg(feature = "core-local")]
+#[tokio::test]
+async fn core_local_clean_and_custom_recycling_methods() {
+    for recycling_method in [
+        RecyclingMethod::Clean,
+        RecyclingMethod::Custom("RESET ALL;".to_string()),
+    ] {
+        let pool = create_core_local_pool(recycling_method);
+        let local = pool.local();
+        for _ in 0..5 {
+            let client = local.get().await.unwrap();
+            let rows = client.query("SELECT 1 + 2", &[]).await.unwrap();
+            let value: i32 = rows[0].get(0);
+            assert_eq!(value, 3);
+        }
+    }
 }
 
 struct Env {

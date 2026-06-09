@@ -6,10 +6,10 @@ use crate::Runtime;
 ///
 /// Storage mode selection is configured through [`Pool`] constructors rather
 /// than stored in this public field-based config type. Constructors use
-/// [`PoolMode::Shared`] unless [`PoolMode::CoreLocal`] is selected explicitly.
+/// [`PoolMode::Shared`] unless `PoolMode::CoreLocal` is selected explicitly
+/// with the `core-local` feature enabled.
 ///
 /// [`Pool`]: super::Pool
-/// [`PoolMode::CoreLocal`]: crate::PoolMode::CoreLocal
 /// [`PoolMode::Shared`]: crate::PoolMode::Shared
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]

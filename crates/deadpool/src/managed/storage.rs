@@ -94,6 +94,14 @@ impl<T> PoolStorage<T> {
         }
     }
 
+    #[cfg(feature = "core-local")]
+    pub(crate) fn local_waiting(&self) -> usize {
+        self.local_storages()
+            .iter()
+            .map(|local| local.waiting())
+            .sum()
+    }
+
     fn shared(&self) -> &SharedStorage<T> {
         match self {
             Self::Shared(storage) => storage,
@@ -172,6 +180,8 @@ pub(crate) struct LocalStorage<T> {
     queue: SegQueue<T>,
     available: AtomicUsize,
     waits: AtomicUsize,
+    waiters: AtomicUsize,
+    shared_fallbacks: AtomicUsize,
     owners: AtomicUsize,
     active: AtomicBool,
     semaphore: Semaphore,
@@ -184,6 +194,8 @@ impl<T> Default for LocalStorage<T> {
             queue: SegQueue::new(),
             available: AtomicUsize::new(0),
             waits: AtomicUsize::new(0),
+            waiters: AtomicUsize::new(0),
+            shared_fallbacks: AtomicUsize::new(0),
             owners: AtomicUsize::new(1),
             active: AtomicBool::new(true),
             semaphore: Semaphore::new(0),
@@ -215,6 +227,8 @@ impl<T> LocalStorage<T> {
 
     pub(crate) async fn pop_wait(&self) -> Option<T> {
         let _ = self.waits.fetch_add(1, Ordering::Relaxed);
+        let _ = self.waiters.fetch_add(1, Ordering::Relaxed);
+        let _guard = WaitGuard(&self.waiters);
         let permit = self.semaphore.acquire().await.ok()?;
         permit.forget();
         let value = self.queue.pop();
@@ -247,6 +261,18 @@ impl<T> LocalStorage<T> {
         self.waits.load(Ordering::Relaxed)
     }
 
+    pub(crate) fn waiting(&self) -> usize {
+        self.waiters.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn record_shared_fallback(&self) {
+        let _ = self.shared_fallbacks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn shared_fallbacks(&self) -> usize {
+        self.shared_fallbacks.load(Ordering::Relaxed)
+    }
+
     pub(crate) fn is_active(&self) -> bool {
         self.active.load(Ordering::Relaxed)
     }
@@ -258,5 +284,15 @@ impl<T> LocalStorage<T> {
             drained.push(value);
         }
         drained
+    }
+}
+
+#[cfg(feature = "core-local")]
+struct WaitGuard<'a>(&'a AtomicUsize);
+
+#[cfg(feature = "core-local")]
+impl Drop for WaitGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.fetch_sub(1, Ordering::Relaxed);
     }
 }

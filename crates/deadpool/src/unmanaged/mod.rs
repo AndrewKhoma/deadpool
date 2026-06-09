@@ -35,7 +35,7 @@ mod storage;
 use std::{
     ops::{Deref, DerefMut},
     sync::{Arc, Weak, atomic::Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(feature = "core-local")]
@@ -332,18 +332,23 @@ impl<T> Pool<T> {
         duration: Option<Duration>,
         local: &Arc<LocalStorage<T>>,
     ) -> Result<Object<T>, PoolError> {
+        let deadline = duration.map(|duration| Instant::now() + duration);
         loop {
             if let Some(obj) = local.pop() {
                 return Ok(self.wrap_object(obj, Some(Arc::downgrade(local))));
             }
 
+            local.record_shared_fallback();
             match self.try_get_for_local(local) {
                 Ok(obj) => return Ok(obj),
                 Err(PoolError::Timeout) => {
                     if duration.is_some_and(|duration| duration.as_nanos() == 0) {
                         return Err(PoolError::Timeout);
                     }
-                    if let Some(obj) = self.wait_for_local_object(duration, local).await? {
+                    if let Some(obj) = self
+                        .wait_for_local_object(duration, deadline, local)
+                        .await?
+                    {
                         return Ok(self.wrap_object(obj, Some(Arc::downgrade(local))));
                     }
                 }
@@ -356,14 +361,27 @@ impl<T> Pool<T> {
     async fn wait_for_local_object(
         &self,
         duration: Option<Duration>,
+        deadline: Option<Instant>,
         local: &LocalStorage<T>,
     ) -> Result<Option<T>, PoolError> {
-        match (duration, self.inner.config.runtime) {
-            (None, _) => Ok(local.pop_wait().await),
-            (Some(duration), Some(runtime)) => timeout(runtime, duration, local.pop_wait())
-                .await
-                .ok_or(PoolError::Timeout),
-            (Some(_), None) => Err(PoolError::NoRuntimeSpecified),
+        match (duration, deadline, self.inner.config.runtime) {
+            (None, _, _) => Ok(local.pop_wait().await),
+            (Some(_), Some(deadline), Some(runtime)) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    Err(PoolError::Timeout)
+                } else {
+                    timeout(
+                        runtime,
+                        deadline.saturating_duration_since(now),
+                        local.pop_wait(),
+                    )
+                    .await
+                    .ok_or(PoolError::Timeout)
+                }
+            }
+            (Some(_), _, None) => Err(PoolError::NoRuntimeSpecified),
+            (Some(_), None, Some(_)) => unreachable!("deadline exists when timeout exists"),
         }
     }
 
@@ -834,5 +852,14 @@ impl<T> LocalPool<T> {
     #[doc(hidden)]
     pub fn local_wait_count(&self) -> usize {
         self.local.as_ref().map_or(0, |local| local.waits())
+    }
+
+    /// Returns how often this local handle fell back to shared storage.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn local_shared_fallback_count(&self) -> usize {
+        self.local
+            .as_ref()
+            .map_or(0, |local| local.shared_fallbacks())
     }
 }

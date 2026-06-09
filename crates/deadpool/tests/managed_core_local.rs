@@ -193,6 +193,52 @@ async fn local_waiter_with_timeout_is_woken_by_local_return() {
     assert_eq!(*waiter.await.unwrap().unwrap(), 0);
 }
 
+#[cfg(feature = "rt_tokio_1")]
+#[tokio::test]
+async fn local_waiter_timeout_is_bounded_by_original_deadline() {
+    let pool = Pool::builder(TestManager::default())
+        .max_size(1)
+        .runtime(Runtime::Tokio1)
+        .pool_mode(PoolMode::CoreLocal)
+        .build()
+        .unwrap();
+    let local_a = pool.local();
+    let local_b = pool.local();
+    drop(local_a.get().await.unwrap());
+
+    let started = std::time::Instant::now();
+    let result = local_b
+        .timeout_get(&Timeouts {
+            wait: Some(Duration::from_millis(30)),
+            create: None,
+            recycle: None,
+        })
+        .await;
+
+    assert!(matches!(result, Err(PoolError::Timeout(_))));
+    assert!(started.elapsed() < Duration::from_millis(250));
+    assert_eq!(pool.status().waiting, 0);
+}
+
+#[tokio::test]
+async fn status_counts_local_waiter_blocked_by_origin_owned_idle() {
+    let (pool, _) = core_local_pool(1);
+    let local_a = pool.local();
+    let local_b = pool.local();
+    drop(local_a.get().await.unwrap());
+
+    let waiter = tokio::spawn(async move { local_b.get().await });
+    for _ in 0..100 {
+        if pool.status().waiting == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert_eq!(pool.status().waiting, 1);
+    pool.close();
+    assert!(matches!(waiter.await.unwrap(), Err(PoolError::Closed)));
+}
+
 #[tokio::test]
 async fn local_waiter_is_woken_by_shared_return_and_close() {
     let (pool, _) = core_local_pool(1);

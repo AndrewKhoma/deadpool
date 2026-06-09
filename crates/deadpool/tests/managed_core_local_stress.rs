@@ -40,6 +40,7 @@ struct Measurement {
     creates_after_warmup: usize,
     creates_during_measurement: usize,
     local_waits: usize,
+    shared_fallbacks: usize,
 }
 
 fn p99(mut samples: Vec<Duration>) -> Duration {
@@ -61,6 +62,10 @@ async fn measure_local(workers: usize, iterations: usize) -> Measurement {
         drop(local.get().await.unwrap());
     }
     let creates_after_warmup = creates.load(Ordering::Relaxed);
+    let fallback_after_warmup: usize = locals
+        .iter()
+        .map(|local| local.local_shared_fallback_count())
+        .sum();
 
     let started = Instant::now();
     let mut handles = Vec::with_capacity(workers);
@@ -72,15 +77,21 @@ async fn measure_local(workers: usize, iterations: usize) -> Measurement {
                 drop(local.get().await.unwrap());
                 samples.push(before.elapsed());
             }
-            (samples, local.local_wait_count())
+            (
+                samples,
+                local.local_wait_count(),
+                local.local_shared_fallback_count(),
+            )
         }));
     }
     let mut samples = Vec::new();
     let mut local_waits = 0;
+    let mut shared_fallbacks = 0;
     for handle in handles {
-        let (handle_samples, handle_waits) = handle.await.unwrap();
+        let (handle_samples, handle_waits, handle_fallbacks) = handle.await.unwrap();
         samples.extend(handle_samples);
         local_waits += handle_waits;
+        shared_fallbacks += handle_fallbacks;
     }
     let elapsed = started.elapsed();
     let throughput_per_second = samples.len() as f64 / elapsed.as_secs_f64();
@@ -97,6 +108,7 @@ async fn measure_local(workers: usize, iterations: usize) -> Measurement {
         creates_after_warmup,
         creates_during_measurement,
         local_waits,
+        shared_fallbacks: shared_fallbacks - fallback_after_warmup,
     }
 }
 
@@ -141,6 +153,7 @@ async fn measure_shared(workers: usize, iterations: usize) -> Measurement {
         creates_after_warmup,
         creates_during_measurement: creates.load(Ordering::Relaxed) - creates_after_warmup,
         local_waits: 0,
+        shared_fallbacks: 0,
     }
 }
 
@@ -189,16 +202,11 @@ async fn managed_core_local_stress_gate() {
         assert_eq!(local.creates_after_warmup, workers);
         assert_eq!(local.creates_during_measurement, 0);
         assert_eq!(local.local_waits, 0);
+        assert_eq!(local.shared_fallbacks, 0);
         assert!(local.throughput_per_second.is_finite() && local.throughput_per_second > 0.0);
-        let p99_tolerance = shared.p99 + Duration::from_micros(50);
+        assert!(local.p99 <= shared.p99);
         assert!(
-            local.p99 <= p99_tolerance,
-            "local p99 {:?} exceeded shared p99 {:?} plus tolerance",
-            local.p99,
-            shared.p99
-        );
-        assert!(
-            local.throughput_per_second >= shared.throughput_per_second * 0.8,
+            local.throughput_per_second >= shared.throughput_per_second,
             "local throughput {} was below shared throughput {} tolerance",
             local.throughput_per_second,
             shared.throughput_per_second

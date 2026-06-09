@@ -96,6 +96,25 @@ async fn local_timeout_and_no_runtime_behaviour_matches_pool() {
     wait_until(|| pool.status().waiting == 1).await;
     local.add(3).await.unwrap();
     assert_eq!(*waiter.await.unwrap().unwrap(), 3);
+    let pool = Pool::from_config_with_mode(
+        &deadpool::unmanaged::PoolConfig {
+            max_size: 1,
+            timeout: Some(Duration::from_millis(50)),
+            runtime: Some(Runtime::Tokio1),
+        },
+        PoolMode::CoreLocal,
+    );
+    let local_a = pool.local();
+    let local_b = pool.local();
+    local_a.add(4).await.unwrap();
+    drop(local_a.get().await.unwrap());
+    let started = std::time::Instant::now();
+    assert!(matches!(
+        local_b.timeout_get(Some(Duration::from_millis(20))).await,
+        Err(PoolError::Timeout)
+    ));
+    assert!(started.elapsed() < Duration::from_millis(250));
+    assert_eq!(pool.status().waiting, 0);
 }
 
 #[tokio::test]
@@ -120,6 +139,42 @@ async fn take_remove_close_and_local_drop_release_capacity() {
     pool.close();
     assert_eq!(pool.status().size, 0);
     assert!(matches!(local.try_get(), Err(PoolError::Closed)));
+}
+
+#[tokio::test]
+async fn boundary_capacity_cases_preserve_accounting() {
+    let pool = Pool::<usize>::new_with_mode(0, PoolMode::CoreLocal);
+    let local = pool.local();
+    assert!(matches!(local.try_add(1), Err((1, PoolError::Timeout))));
+    assert!(matches!(local.try_get(), Err(PoolError::Timeout)));
+    assert_eq!(pool.status().size, 0);
+
+    let pool = Pool::new_with_mode(1, PoolMode::CoreLocal);
+    let local = pool.local();
+    local.add(1).await.unwrap();
+    let checked_out = local.get().await.unwrap();
+    let waiter = {
+        let local = local.clone();
+        tokio::spawn(async move { local.get().await })
+    };
+    wait_until(|| local.local_wait_count() > 0).await;
+    assert_eq!(deadpool::unmanaged::Object::take(checked_out), 1);
+    local.add(2).await.unwrap();
+    assert_eq!(*waiter.await.unwrap().unwrap(), 2);
+    assert_eq!(pool.status().size, 1);
+    assert_eq!(pool.status().available, 1);
+
+    let pool = Pool::new_with_mode(1024, PoolMode::CoreLocal);
+    let local = pool.local();
+    for i in 0..1024 {
+        local.try_add(i).unwrap();
+    }
+    assert!(matches!(
+        local.try_add(1025),
+        Err((1025, PoolError::Timeout))
+    ));
+    assert_eq!(pool.status().size, 1024);
+    assert_eq!(pool.status().available, 1024);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

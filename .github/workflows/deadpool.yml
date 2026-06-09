@@ -17,6 +17,8 @@ jobs:
           components: rustc,rust-std,cargo
           toolchain: stable
       - run: cargo check --no-default-features --features ${{ matrix.feature1 }},${{ matrix.feature2 }}
+      - run: cargo check --no-default-features --features managed,core-local,rt_tokio_1
+      - run: cargo check --no-default-features --features unmanaged,core-local,rt_tokio_1
     strategy:
       fail-fast: false
       matrix:

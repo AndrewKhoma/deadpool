@@ -1,5 +1,3 @@
-#[cfg(not(target_arch = "wasm32"))]
-use std::time::Instant;
 use std::{
     collections::VecDeque,
     fmt,
@@ -9,7 +7,7 @@ use std::{
         Arc, Weak,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use deadpool_runtime::{Runtime, timeout};
@@ -203,8 +201,10 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
         timeouts: &Timeouts,
         local: &Arc<LocalStorage<ObjectInner<M>>>,
     ) -> Result<W, PoolError<M::Error>> {
+        let deadline = timeouts.wait.map(|duration| Instant::now() + duration);
         loop {
             let Some(inner_obj) = local.pop() else {
+                local.record_shared_fallback();
                 let mut try_timeouts = *timeouts;
                 try_timeouts.wait = Some(Duration::from_millis(0));
                 match self
@@ -219,7 +219,9 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
                         {
                             return Err(PoolError::Timeout(TimeoutType::Wait));
                         }
-                        if let Some(inner_obj) = self.wait_for_local_object(timeouts, local).await?
+                        if let Some(inner_obj) = self
+                            .wait_for_local_object(timeouts, deadline, local)
+                            .await?
                         {
                             if let Some(obj) = self
                                 .checkout_local_inner(timeouts, local, inner_obj)
@@ -250,18 +252,31 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
     async fn wait_for_local_object(
         &self,
         timeouts: &Timeouts,
+        deadline: Option<Instant>,
         local: &LocalStorage<ObjectInner<M>>,
     ) -> Result<Option<ObjectInner<M>>, PoolError<M::Error>> {
         let _ = self.inner.users.fetch_add(1, Ordering::Relaxed);
         let users_guard = DropGuard(|| {
             let _ = self.inner.users.fetch_sub(1, Ordering::Relaxed);
         });
-        let result = match (self.inner.runtime, timeouts.wait) {
-            (_, None) => Ok(local.pop_wait().await),
-            (Some(runtime), Some(duration)) => timeout(runtime, duration, local.pop_wait())
-                .await
-                .ok_or(PoolError::Timeout(TimeoutType::Wait)),
-            (None, Some(_)) => Err(PoolError::NoRuntimeSpecified),
+        let result = match (self.inner.runtime, timeouts.wait, deadline) {
+            (_, None, _) => Ok(local.pop_wait().await),
+            (Some(runtime), Some(_), Some(deadline)) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    Err(PoolError::Timeout(TimeoutType::Wait))
+                } else {
+                    timeout(
+                        runtime,
+                        deadline.saturating_duration_since(now),
+                        local.pop_wait(),
+                    )
+                    .await
+                    .ok_or(PoolError::Timeout(TimeoutType::Wait))
+                }
+            }
+            (None, Some(_), _) => Err(PoolError::NoRuntimeSpecified),
+            (_, Some(_), None) => unreachable!("deadline exists when timeout exists"),
         };
         drop(users_guard);
         result
@@ -624,6 +639,10 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
     pub fn status(&self) -> Status {
         let slots = self.inner.storage.slots();
         let users = self.inner.users.load(Ordering::Relaxed);
+        #[cfg(feature = "core-local")]
+        let local_waiting = self.inner.storage.local_waiting();
+        #[cfg(not(feature = "core-local"))]
+        let local_waiting = 0;
         let (available, waiting) = if users < slots.size {
             (slots.size - users, 0)
         } else {
@@ -633,7 +652,7 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
             max_size: slots.max_size,
             size: slots.size,
             available,
-            waiting,
+            waiting: waiting.max(local_waiting),
         }
     }
 
@@ -835,6 +854,15 @@ impl<M: Manager, W: From<Object<M>>> LocalPool<M, W> {
     #[doc(hidden)]
     pub fn local_wait_count(&self) -> usize {
         self.local.as_ref().map_or(0, |local| local.waits())
+    }
+
+    /// Returns how often this local handle fell back to shared storage.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn local_shared_fallback_count(&self) -> usize {
+        self.local
+            .as_ref()
+            .map_or(0, |local| local.shared_fallbacks())
     }
 }
 

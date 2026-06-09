@@ -24,6 +24,7 @@ jobs:
           - serde
           - rt_tokio_1
           - rt_async-std_1
+          - core-local,rt_tokio_1
         os:
           - ubuntu-latest
           - windows-2025

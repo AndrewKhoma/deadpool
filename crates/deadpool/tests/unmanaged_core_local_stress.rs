@@ -9,6 +9,7 @@ struct Measurement {
     p99: Duration,
     throughput_per_second: f64,
     local_waits: usize,
+    shared_fallbacks: usize,
 }
 
 fn p99(mut samples: Vec<Duration>) -> Duration {
@@ -22,6 +23,10 @@ async fn measure_local(workers: usize, iterations: usize) -> Measurement {
     for local in &locals {
         local.add(()).await.unwrap();
     }
+    let fallback_after_warmup: usize = locals
+        .iter()
+        .map(|local| local.local_shared_fallback_count())
+        .sum();
 
     let started = Instant::now();
     let mut handles = Vec::with_capacity(workers);
@@ -33,16 +38,22 @@ async fn measure_local(workers: usize, iterations: usize) -> Measurement {
                 drop(local.get().await.unwrap());
                 samples.push(before.elapsed());
             }
-            (samples, local.local_wait_count())
+            (
+                samples,
+                local.local_wait_count(),
+                local.local_shared_fallback_count(),
+            )
         }));
     }
 
     let mut samples = Vec::new();
     let mut local_waits = 0;
+    let mut shared_fallbacks = 0;
     for handle in handles {
-        let (handle_samples, waits) = handle.await.unwrap();
+        let (handle_samples, waits, fallbacks) = handle.await.unwrap();
         samples.extend(handle_samples);
         local_waits += waits;
+        shared_fallbacks += fallbacks;
     }
     let elapsed = started.elapsed();
 
@@ -50,6 +61,7 @@ async fn measure_local(workers: usize, iterations: usize) -> Measurement {
         p99: p99(samples.clone()),
         throughput_per_second: samples.len() as f64 / elapsed.as_secs_f64(),
         local_waits,
+        shared_fallbacks: shared_fallbacks - fallback_after_warmup,
     }
 }
 
@@ -83,6 +95,7 @@ async fn measure_shared(workers: usize, iterations: usize) -> Measurement {
         p99: p99(samples.clone()),
         throughput_per_second: samples.len() as f64 / elapsed.as_secs_f64(),
         local_waits: 0,
+        shared_fallbacks: 0,
     }
 }
 
@@ -116,9 +129,10 @@ async fn unmanaged_core_local_stress_gate() {
         let shared = measure_shared(workers, 512).await;
         let local = measure_local(workers, 512).await;
         assert_eq!(local.local_waits, 0);
+        assert_eq!(local.shared_fallbacks, 0);
         assert!(local.throughput_per_second.is_finite() && local.throughput_per_second > 0.0);
-        assert!(local.p99 <= shared.p99 + Duration::from_micros(50));
-        assert!(local.throughput_per_second >= shared.throughput_per_second * 0.8);
+        assert!(local.p99 <= shared.p99);
+        assert!(local.throughput_per_second >= shared.throughput_per_second);
         eprintln!("workers={workers} shared={shared:?} local={local:?}");
     }
 }

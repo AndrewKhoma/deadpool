@@ -43,7 +43,7 @@ Verification will combine existing crate tests, new managed/unmanaged core-local
 - [x] **Phase 2: Managed Core-Local Pool Mode** - Implement managed-pool core-local storage integration and managed behavior coverage.
 - [x] **Phase 3: Unmanaged Core-Local Pool Mode** - Implement unmanaged-pool core-local storage integration and unmanaged behavior coverage.
 - [x] **Phase 4: PostgreSQL Compatibility and Stress Validation** - Validate reexported PostgreSQL usage, gateway-style expectations, feature combinations, and performance/stress entry points.
-- [ ] **Phase 5: Documentation** - Document opt-in usage, lockfree boundaries, compatibility expectations, and as-built implementation details.
+- [x] **Phase 5: Documentation** - Document opt-in usage, lockfree boundaries, compatibility expectations, and as-built implementation details.
 
 ## Phase Candidates
 
@@ -209,19 +209,19 @@ Verification will combine existing crate tests, new managed/unmanaged core-local
 
 #### Automated Verification:
 
-- [ ] Core docs build: `cd crates/deadpool && cargo doc --no-deps --all-features`
-- [ ] PostgreSQL docs build if PostgreSQL docs changed: `cd crates/deadpool-postgres && cargo doc --no-deps --features serde,rt_tokio_1,rt_async-std_1`
-- [ ] Formatting remains clean: `cd crates/deadpool && cargo fmt --check`
+- [x] Core docs build: `cd crates/deadpool && cargo doc --no-deps --all-features`
+- [x] PostgreSQL docs build if PostgreSQL docs changed: `cd crates/deadpool-postgres && cargo doc --no-deps --features serde,rt_tokio_1,rt_async-std_1`
+- [x] Formatting remains clean: `cd crates/deadpool && cargo fmt --check`
 
 #### Manual Verification:
 
-- [ ] Docs clearly state default behavior is unchanged.
-- [ ] Docs clearly state the steady-state operations covered by the lockfree guarantee.
-- [ ] Docs clearly state explicit local-handle usage, same-handle hot-path guarantees, and origin-handle/cross-local reclamation behavior.
-- [ ] Docs clearly list lifecycle operations and manager/recycle behavior outside the strict lockfree boundary.
-- [ ] Docs clearly state whether core-local mode preserves, weakens, or excludes strict waiter fairness and where `QueueMode::Fifo` / `QueueMode::Lifo` ordering applies.
-- [ ] Docs include enough opt-in guidance for a gateway-style user to evaluate the new mode without modifying the gateway reference tree.
-- [ ] Docs include staged rollout, monitoring, and rollback guidance for returning to shared mode.
+- [x] Docs clearly state default behavior is unchanged.
+- [x] Docs clearly state the steady-state operations covered by the lockfree guarantee.
+- [x] Docs clearly state explicit local-handle usage, same-handle hot-path guarantees, and origin-handle/cross-local reclamation behavior.
+- [x] Docs clearly list lifecycle operations and manager/recycle behavior outside the strict lockfree boundary.
+- [x] Docs clearly state whether core-local mode preserves, weakens, or excludes strict waiter fairness and where `QueueMode::Fifo` / `QueueMode::Lifo` ordering applies.
+- [x] Docs include enough opt-in guidance for a gateway-style user to evaluate the new mode without modifying the gateway reference tree.
+- [x] Docs include staged rollout, monitoring, and rollback guidance for returning to shared mode.
 
 ---
 

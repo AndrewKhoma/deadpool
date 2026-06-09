@@ -15,6 +15,7 @@ and `tokio_postgres::Transaction`.
 | `rt_tokio_1`     | Enable support for [tokio](https://crates.io/crates/tokio) crate         | `deadpool/rt_tokio_1`            | yes     |
 | `rt_async-std_1` | Enable support for [async-std](https://crates.io/crates/async-std) crate | `deadpool/rt_async-std_1`        | no      |
 | `serde`          | Enable support for [serde](https://crates.io/crates/serde) crate         | `deadpool/serde`, `serde/derive` | no      |
+| `core-local`     | Enable explicit local pool handles from `deadpool`                       | `deadpool/core-local`            | no      |
 
 **Important:** `async-std` support is currently limited to the
 `async-std` specific timeout function. You still need to enable
@@ -126,6 +127,9 @@ async fn main() {
     }
 }
 ```
+
+With the `core-local` feature enabled, use `PoolBuilder::pool_mode(PoolMode::CoreLocal)`
+and `pool.local()` to create explicit local handles backed by shared capacity.
 
 ## FAQ
 

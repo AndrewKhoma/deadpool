@@ -27,6 +27,7 @@ This crate provides two implementations:
 | `rt_async-std_1` | Enable support for [async-std](https://crates.io/crates/async-std) crate | `async-std`                            | no      |
 | `rt_smol_2`      | Enable support for [smol](https://crates.io/crates/smol) crate           | `async-io`, `blocking`, `futures-lite` | no      |
 | `serde`          | Enable support for deserializing pool config                             | `serde/derive`                         | no      |
+| `core-local`     | Enable explicit local pool handles sharing global capacity               | `crossbeam-queue`                      | no      |
 
 The runtime features (`rt_*`) are only needed if you need support for
 timeouts. If you try to use timeouts without specifying a runtime at
@@ -149,6 +150,12 @@ things a little different and that is the main reason for it to exist:
 
 - **Deadpool is resizable.** You can grow and shrink the pool at runtime
   without requiring an application restart.
+
+- **Deadpool supports core-local handles.** With the `core-local` feature,
+  `PoolMode::CoreLocal` enables explicit local handles for managed and
+  unmanaged pools. Same-handle checkout/checkin uses local idle queues while
+  shared fallback, lifecycle operations, creation, recycling, status and close
+  keep their existing synchronization boundaries.
 
 
 ## Unmanaged pool

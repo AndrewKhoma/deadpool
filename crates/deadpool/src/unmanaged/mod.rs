@@ -198,8 +198,9 @@ impl<T> Pool<T> {
 
     /// Creates a local handle for this pool.
     ///
-    /// Unmanaged local handles currently delegate to the backing pool in both
-    /// [`PoolMode::Shared`] and [`PoolMode::CoreLocal`].
+    /// In [`PoolMode::Shared`], the handle delegates to the shared pool. In
+    /// [`PoolMode::CoreLocal`], the handle owns local idle objects for
+    /// same-handle returns while sharing global capacity with the backing pool.
     #[cfg(feature = "core-local")]
     #[cfg_attr(docsrs, doc(cfg(feature = "core-local")))]
     #[must_use]
@@ -649,8 +650,9 @@ impl<T> Pool<T> {
 
 /// Local handle for an unmanaged [`Pool`].
 ///
-/// Unmanaged local handles provide the same public API as [`Pool`] while
-/// delegating to the backing pool storage.
+/// In [`PoolMode::CoreLocal`], same-handle checkout and return use this
+/// handle's local idle storage while capacity remains shared with the backing
+/// pool. In [`PoolMode::Shared`], operations delegate to the backing pool.
 #[cfg(feature = "core-local")]
 #[cfg_attr(docsrs, doc(cfg(feature = "core-local")))]
 pub struct LocalPool<T> {
@@ -715,7 +717,9 @@ impl<T> LocalPool<T> {
 
     /// Retrieves an [`Object`] from this local handle.
     ///
-    /// Delegates to [`Pool::get`].
+    /// In [`PoolMode::CoreLocal`], this first checks the handle's local idle
+    /// storage and otherwise uses shared pool availability. In
+    /// [`PoolMode::Shared`], this delegates to [`Pool::get`].
     ///
     /// # Errors
     ///
@@ -726,7 +730,9 @@ impl<T> LocalPool<T> {
 
     /// Retrieves an [`Object`] from this local handle without waiting.
     ///
-    /// Delegates to [`Pool::try_get`].
+    /// In [`PoolMode::CoreLocal`], this first checks the handle's local idle
+    /// storage and otherwise uses shared pool availability. In
+    /// [`PoolMode::Shared`], this delegates to [`Pool::try_get`].
     ///
     /// # Errors
     ///
@@ -740,7 +746,10 @@ impl<T> LocalPool<T> {
 
     /// Retrieves an [`Object`] from this local handle using a custom timeout.
     ///
-    /// Delegates to [`Pool::timeout_get`].
+    /// In [`PoolMode::CoreLocal`], this first checks the handle's local idle
+    /// storage and otherwise uses shared pool availability with the supplied
+    /// timeout. In [`PoolMode::Shared`], this delegates to
+    /// [`Pool::timeout_get`].
     ///
     /// # Errors
     ///

@@ -92,6 +92,7 @@ Acceptance Scenarios:
 - FR-011: Existing feature-gated runtime and configuration behavior MUST remain compatible for supported feature combinations. (Stories: P2)
 - FR-012: The repository MUST include tests or benchmarks that exercise the new opt-in behavior under concurrent checkout/checkin and capacity pressure. (Stories: P1, P4)
 - FR-013: Documentation MUST explain how users select the new behavior, what compatibility is preserved, and which operations are outside the steady-state lockfree guarantee. (Stories: P2, P3)
+- FR-014: PostgreSQL users MUST be able to opt into the core-local behavior through a `deadpool-postgres` feature path that forwards the core Deadpool feature and remains covered by downstream crate verification. (Stories: P2, P4)
 
 ### Key Entities
 
@@ -100,14 +101,15 @@ Acceptance Scenarios:
 - Unmanaged Pool: A pool where users explicitly add and remove reusable objects.
 - Checked-Out Object: A temporary owner of pooled capacity that returns or detaches the object according to existing rules.
 - Opt-In Lockfree Behavior: A user-selected pool mode intended to avoid blocking synchronization on steady-state checkout/checkin.
-- Local Idle State: Reusable object availability associated with a local execution context.
+- Local Pool Handle: An explicit user-created handle representing one core/local execution context; handles share global capacity but own their local idle state.
+- Local Idle State: Reusable object availability associated with a local pool handle.
 - Shared Capacity: Global accounting that prevents the pool from exceeding configured maximum size.
 
 ### Cross-Cutting / Non-Functional
 
 - Compatibility: Existing public behavior and feature combinations should remain source-compatible where practical.
 - Correctness: Capacity accounting must remain accurate across checkout, return, detach, close, timeout, creation failure, and recycling failure.
-- Performance: The new behavior must be measurable through repository tests or benchmarks focused on concurrent checkout/checkin.
+- Performance: The new behavior must be measurable through repository tests or benchmarks focused on concurrent checkout/checkin, with comparative pass/fail gates against existing shared-mode behavior.
 - Documentation: Lockfree guarantees and exclusions must be explicit enough for users to decide whether the opt-in mode fits their runtime model.
 
 ## Success Criteria
@@ -117,7 +119,9 @@ Acceptance Scenarios:
 - SC-003: Capacity exhaustion, timeout, creation failure, recycling failure, close, detach, and status edge cases are covered for the new behavior or explicitly shown to reuse existing behavior. (FR-004, FR-005, FR-006, FR-009, FR-010)
 - SC-004: Downstream-style PostgreSQL pool usage remains compatible without modifying the gateway reference tree. (FR-007, FR-008)
 - SC-005: Documentation clearly distinguishes steady-state lockfree checkout/checkin from lifecycle operations that may use bounded synchronization. (FR-009, FR-013)
-- SC-006: Benchmark or stress-test entry points exist to compare checkout/checkin behavior under concurrent and thread-per-core-like workloads. (FR-003, FR-012)
+- SC-006: Benchmark or stress-test entry points compare checkout/checkin behavior under concurrent and thread-per-core-like workloads and record comparative results. (FR-003, FR-012)
+- SC-007: For pre-populated steady-state checkout/checkin at 1, 8, 16, and 32 workers, the opt-in core-local mode shows zero observed blocking/parking on the local hot path, p99 checkout latency no worse than shared mode, and throughput no worse than shared mode. (FR-001, FR-003, FR-012)
+- SC-008: `deadpool-postgres` feature-forwarding, docs, and tests demonstrate that PostgreSQL users can opt into core-local behavior through the downstream crate without gateway source changes. (FR-007, FR-014)
 
 ## Assumptions
 
@@ -125,7 +129,8 @@ Acceptance Scenarios:
 - Opt-in behavior is acceptable and preferred over changing default behavior for all Deadpool users.
 - Strict waiter fairness is not a required public behavior unless code research later identifies a stronger compatibility contract.
 - Gateway source changes are outside this work; the gateway is used for validation context only.
-- Thread-per-core suitability can be represented by stable local execution contexts plus shared capacity constraints without embedding PostgreSQL-specific session behavior into the core library.
+- Thread-per-core suitability is represented by explicit per-core/local pool handles sharing global capacity; automatic runtime-worker or task-local sharding is not assumed.
+- Checked-out objects from core-local handles carry their origin local handle identity. Same-handle return is the steady-state lockfree path; cross-handle or migrated-task return is outside that guarantee and must use a documented safe reclamation path that returns the object to its origin handle when possible or releases/detaches capacity if the origin handle is closed or inactive.
 
 ## Scope
 
@@ -133,6 +138,7 @@ In Scope:
 - Deadpool core pooling behavior needed for opt-in lockfree steady-state checkout/checkin.
 - Managed and unmanaged pool compatibility.
 - PostgreSQL integration compatibility as a downstream user of the managed pool API.
+- `deadpool-postgres` feature forwarding and verification for the opt-in core-local mode.
 - Tests, benchmarks, and documentation directly related to the new behavior.
 - Use of `.paw` reference trees to understand gateway and reference-pool expectations.
 
@@ -141,6 +147,7 @@ Out of Scope:
 - Requiring the external ADO PR as an input unless local references prove insufficient.
 - Moving PostgreSQL-specific session-reset behavior into the generic Deadpool core.
 - Guaranteeing lockfree behavior for initialization, shutdown, resizing, maintenance, status collection, object creation, or error recovery.
+- Automatically inferring runtime-worker affinity for a single shared pool without explicit local handles.
 - Introducing strict waiter fairness unless required for existing compatibility.
 
 ## Dependencies
@@ -156,6 +163,7 @@ Out of Scope:
 - Public API compatibility regression: Existing users may rely on subtle behavior. Mitigation: keep the new behavior opt-in and run existing API and behavior tests.
 - Capacity-accounting errors under concurrency: Lost or duplicate permits could cause deadlocks or over-capacity use. Mitigation: add stress coverage for checkout, return, detach, close, timeout, and failure paths.
 - Runtime model mismatch: A generic library may not know whether execution is truly core-affine. Mitigation: document the required runtime assumptions for the opt-in behavior.
+- Local-handle misuse: Applications may return or share objects across local handles. Mitigation: define the cross-local return contract, fail-safe behavior, and stress tests before implementation.
 - PostgreSQL coupling: The reference pool contains PostgreSQL-specific behavior that should not leak into the generic core. Mitigation: separate generic pool requirements from PostgreSQL integration compatibility requirements.
 - Incomplete external context: The referenced ADO PR may contain additional constraints. Mitigation: proceed with local references and ask for the PR to be pulled under `.paw` only if code research identifies missing requirements.
 

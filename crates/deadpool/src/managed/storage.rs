@@ -253,7 +253,8 @@ impl<T> LocalStorage<T> {
 
     pub(crate) fn drain(&self) -> Vec<T> {
         let mut drained = Vec::new();
-        while let Some(value) = self.pop() {
+        while let Some(value) = self.queue.pop() {
+            let _ = self.available.fetch_sub(1, Ordering::Relaxed);
             drained.push(value);
         }
         drained

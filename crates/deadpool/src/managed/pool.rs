@@ -832,6 +832,8 @@ impl<M: Manager> PoolInner<M> {
         drop(slots);
         if add_permits {
             self.storage.semaphore().add_permits(1);
+            #[cfg(feature = "core-local")]
+            self.notify_local_waiters();
         }
         self.manager.detach(obj);
     }
@@ -919,6 +921,7 @@ impl<M: Manager> PoolInner<M> {
                     drop(slots);
                     if add_permit {
                         self.storage.semaphore().add_permits(1);
+                        self.notify_local_waiters();
                     }
                     self.manager.detach(&mut inner.obj);
                     removed.push(inner.obj);

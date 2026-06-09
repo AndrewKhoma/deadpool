@@ -230,6 +230,41 @@ async fn checked_out_object_releases_capacity_when_origin_handle_is_dropped() {
 }
 
 #[tokio::test]
+async fn dropping_last_local_handle_drains_idle_objects() {
+    let (pool, state) = core_local_pool(1);
+    let local = pool.local();
+    drop(local.get().await.unwrap());
+    assert_eq!(pool.status().size, 1);
+
+    drop(local);
+
+    assert_eq!(pool.status().size, 0);
+    assert_eq!(state.detaches.load(Ordering::Relaxed), 1);
+    let local = pool.local();
+    assert_eq!(*local.get().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn object_take_wakes_local_waiter() {
+    let (pool, _) = core_local_pool(1);
+    let local = pool.local();
+    let obj = local.get().await.unwrap();
+    let waiter = {
+        let local = local.clone();
+        tokio::spawn(async move { local.get().await })
+    };
+
+    for _ in 0..100 {
+        if pool.status().waiting > 0 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(Object::take(obj), 0);
+    assert_eq!(*waiter.await.unwrap().unwrap(), 1);
+}
+
+#[tokio::test]
 async fn object_take_detaches_and_releases_capacity() {
     let (pool, state) = core_local_pool(1);
     let local = pool.local();

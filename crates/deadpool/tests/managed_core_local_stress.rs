@@ -109,6 +109,7 @@ async fn measure_shared(workers: usize, iterations: usize) -> Measurement {
     for _ in 0..workers {
         drop(pool.get().await.unwrap());
     }
+
     let creates_after_warmup = creates.load(Ordering::Relaxed);
 
     let started = Instant::now();
@@ -140,9 +141,39 @@ async fn measure_shared(workers: usize, iterations: usize) -> Measurement {
     }
 }
 
+async fn capacity_pressure_reuses_returned_local_object() {
+    let manager = Manager::default();
+    let creates = manager.creates.clone();
+    let pool: managed::Pool<Manager> = managed::Pool::builder(manager)
+        .max_size(1)
+        .pool_mode(PoolMode::CoreLocal)
+        .build()
+        .unwrap();
+    let local = pool.local();
+    let checked_out = local.get().await.unwrap();
+    let waiter = {
+        let local = local.clone();
+        tokio::spawn(async move {
+            let object = local.get().await.unwrap();
+            (local.local_wait_count(), object)
+        })
+    };
+
+    tokio::task::yield_now().await;
+    drop(checked_out);
+    let (waits, object) = waiter.await.unwrap();
+    drop(object);
+
+    assert!(waits > 0);
+    assert_eq!(creates.load(Ordering::Relaxed), 1);
+    assert_eq!(pool.status().size, 1);
+    assert_eq!(pool.status().available, 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 32)]
 #[ignore = "stress gate for opt-in core-local managed pool mode"]
 async fn managed_core_local_stress_gate() {
+    capacity_pressure_reuses_returned_local_object().await;
     for workers in [1, 8, 16, 32] {
         let shared = measure_shared(workers, 512).await;
         let local = measure_local(workers, 512).await;

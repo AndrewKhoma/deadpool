@@ -6,13 +6,11 @@ use std::{
 #[cfg(feature = "core-local")]
 use std::sync::{
     Arc, Weak,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 #[cfg(feature = "core-local")]
 use crossbeam_queue::SegQueue;
-#[cfg(feature = "core-local")]
-use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 
 use crate::PoolMode;
@@ -174,7 +172,8 @@ pub(crate) struct LocalStorage<T> {
     queue: SegQueue<T>,
     available: AtomicUsize,
     waits: AtomicUsize,
-    notify: Notify,
+    active: AtomicBool,
+    semaphore: Semaphore,
 }
 
 #[cfg(feature = "core-local")]
@@ -184,36 +183,62 @@ impl<T> Default for LocalStorage<T> {
             queue: SegQueue::new(),
             available: AtomicUsize::new(0),
             waits: AtomicUsize::new(0),
-            notify: Notify::new(),
+            active: AtomicBool::new(true),
+            semaphore: Semaphore::new(0),
         }
     }
 }
 
 #[cfg(feature = "core-local")]
 impl<T> LocalStorage<T> {
-    pub(crate) fn push(&self, value: T) {
+    pub(crate) fn push(&self, value: T) -> Result<(), T> {
+        if !self.is_active() {
+            return Err(value);
+        }
         self.queue.push(value);
         let _ = self.available.fetch_add(1, Ordering::Relaxed);
-        self.notify.notify_one();
+        self.semaphore.add_permits(1);
+        Ok(())
     }
 
     pub(crate) fn pop(&self) -> Option<T> {
-        let value = self.queue.pop()?;
-        let _ = self.available.fetch_sub(1, Ordering::Relaxed);
-        Some(value)
+        let permit = self.semaphore.try_acquire().ok()?;
+        permit.forget();
+        let value = self.queue.pop();
+        if value.is_some() {
+            let _ = self.available.fetch_sub(1, Ordering::Relaxed);
+        }
+        value
     }
 
-    pub(crate) async fn notified(&self) {
+    pub(crate) async fn pop_wait(&self) -> Option<T> {
         let _ = self.waits.fetch_add(1, Ordering::Relaxed);
-        self.notify.notified().await;
+        let permit = self.semaphore.acquire().await.ok()?;
+        permit.forget();
+        let value = self.queue.pop();
+        if value.is_some() {
+            let _ = self.available.fetch_sub(1, Ordering::Relaxed);
+        }
+        value
     }
 
-    pub(crate) fn notify_waiters(&self) {
-        self.notify.notify_waiters();
+    pub(crate) fn signal(&self) {
+        if self.is_active() {
+            self.semaphore.add_permits(1);
+        }
+    }
+
+    pub(crate) fn close(&self) {
+        self.active.store(false, Ordering::Relaxed);
+        self.semaphore.close();
     }
 
     pub(crate) fn waits(&self) -> usize {
         self.waits.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.active.load(Ordering::Relaxed)
     }
 
     pub(crate) fn drain(&self) -> Vec<T> {

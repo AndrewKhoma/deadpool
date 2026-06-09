@@ -203,7 +203,15 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
                         {
                             return Err(PoolError::Timeout(TimeoutType::Wait));
                         }
-                        self.wait_for_local_object(timeouts, local).await?;
+                        if let Some(inner_obj) = self.wait_for_local_object(timeouts, local).await?
+                        {
+                            if let Some(obj) = self
+                                .checkout_local_inner(timeouts, local, inner_obj)
+                                .await?
+                            {
+                                return Ok(obj);
+                            }
+                        }
                         continue;
                     }
                     Err(err) => return Err(err),
@@ -227,23 +235,42 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
         &self,
         timeouts: &Timeouts,
         local: &LocalStorage<ObjectInner<M>>,
-    ) -> Result<(), PoolError<M::Error>> {
+    ) -> Result<Option<ObjectInner<M>>, PoolError<M::Error>> {
         let _ = self.inner.users.fetch_add(1, Ordering::Relaxed);
         let users_guard = DropGuard(|| {
             let _ = self.inner.users.fetch_sub(1, Ordering::Relaxed);
         });
         let result = match (self.inner.runtime, timeouts.wait) {
-            (_, None) => {
-                local.notified().await;
-                Ok(())
-            }
-            (Some(runtime), Some(duration)) => timeout(runtime, duration, local.notified())
+            (_, None) => Ok(local.pop_wait().await),
+            (Some(runtime), Some(duration)) => timeout(runtime, duration, local.pop_wait())
                 .await
                 .ok_or(PoolError::Timeout(TimeoutType::Wait)),
             (None, Some(_)) => Err(PoolError::NoRuntimeSpecified),
         };
         drop(users_guard);
         result
+    }
+
+    #[cfg(feature = "core-local")]
+    async fn checkout_local_inner(
+        &self,
+        timeouts: &Timeouts,
+        local: &Arc<LocalStorage<ObjectInner<M>>>,
+        inner_obj: ObjectInner<M>,
+    ) -> Result<Option<W>, PoolError<M::Error>> {
+        let _ = self.inner.users.fetch_add(1, Ordering::Relaxed);
+        let users_guard = DropGuard(|| {
+            let _ = self.inner.users.fetch_sub(1, Ordering::Relaxed);
+        });
+        if let Some(inner_obj) = self.try_recycle_local(timeouts, inner_obj).await? {
+            users_guard.disarm();
+            Ok(Some(
+                self.wrap_object(inner_obj, Some(Arc::downgrade(local)))
+                    .into(),
+            ))
+        } else {
+            Ok(None)
+        }
     }
 
     #[cfg(feature = "core-local")]
@@ -699,6 +726,7 @@ impl<M: Manager, W: From<Object<M>>> Drop for LocalPool<M, W> {
             return;
         };
         if Arc::strong_count(local) == 1 {
+            local.close();
             self.pool.inner.drain_local_storage(local);
         }
     }
@@ -819,8 +847,10 @@ impl<M: Manager> PoolInner<M> {
         let slots = self.storage.slots();
         let keep = slots.size <= slots.max_size;
         drop(slots);
-        if keep {
-            local.push(inner);
+        if keep && local.is_active() {
+            if let Err(inner) = local.push(inner) {
+                self.discard_idle_object(inner);
+            }
         } else {
             self.discard_idle_object(inner);
         }
@@ -892,7 +922,9 @@ impl<M: Manager> PoolInner<M> {
                 }
             }
             for inner in keep {
-                local.push(inner);
+                if let Err(inner) = local.push(inner) {
+                    self.discard_idle_object(inner);
+                }
             }
         }
         retained
@@ -914,7 +946,7 @@ impl<M: Manager> PoolInner<M> {
     #[cfg(feature = "core-local")]
     fn notify_local_waiters(&self) {
         for local in self.storage.local_storages() {
-            local.notify_waiters();
+            local.signal();
         }
     }
 }

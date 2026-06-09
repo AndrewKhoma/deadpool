@@ -443,4 +443,20 @@ async fn post_create_hook_error_recovers_local_capacity() {
     assert!(local.get().await.is_err());
     assert_eq!(pool.status().size, 0);
     assert_eq!(state.detaches.load(Ordering::Relaxed), 1);
+
+    let manager = TestManager::default();
+    let state = manager.state.clone();
+    let pool = Pool::builder(manager)
+        .max_size(1)
+        .pool_mode(PoolMode::CoreLocal)
+        .post_create(Hook::async_fn(|_, _| {
+            Box::pin(async { Err::<(), _>(HookError::message("async post create failed")) })
+        }))
+        .build()
+        .unwrap();
+    let local = pool.local();
+
+    assert!(local.get().await.is_err());
+    assert_eq!(pool.status().size, 0);
+    assert_eq!(state.detaches.load(Ordering::Relaxed), 1);
 }

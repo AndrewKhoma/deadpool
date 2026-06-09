@@ -552,6 +552,8 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
         self.resize(0);
         self.inner.storage.semaphore().close();
         #[cfg(feature = "core-local")]
+        self.inner.notify_local_waiters();
+        #[cfg(feature = "core-local")]
         self.inner.drain_local_objects();
     }
 
@@ -783,6 +785,8 @@ impl<M: Manager> PoolInner<M> {
             slots.vec.push_back(inner);
             drop(slots);
             self.storage.semaphore().add_permits(1);
+            #[cfg(feature = "core-local")]
+            self.notify_local_waiters();
         } else {
             slots.size -= 1;
             drop(slots);

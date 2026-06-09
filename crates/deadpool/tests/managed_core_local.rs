@@ -8,8 +8,10 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "rt_tokio_1")]
+use deadpool::Runtime;
 use deadpool::{
-    PoolMode, Runtime,
+    PoolMode,
     managed::{
         self, Hook, HookError, Metrics, Object, PoolError, RecycleError, RecycleResult, Timeouts,
     },
@@ -145,7 +147,6 @@ async fn local_waiter_observes_resize_grow_capacity() {
     let state = manager.state.clone();
     let pool = Pool::builder(manager)
         .max_size(0)
-        .runtime(Runtime::Tokio1)
         .pool_mode(PoolMode::CoreLocal)
         .build()
         .unwrap();
@@ -160,6 +161,58 @@ async fn local_waiter_observes_resize_grow_capacity() {
 
     assert_eq!(*waiter.await.unwrap().unwrap(), 0);
     assert_eq!(state.creates.load(Ordering::Relaxed), 1);
+}
+
+#[cfg(feature = "rt_tokio_1")]
+#[tokio::test]
+async fn local_waiter_with_timeout_is_woken_by_local_return() {
+    let pool = Pool::builder(TestManager::default())
+        .max_size(1)
+        .runtime(Runtime::Tokio1)
+        .pool_mode(PoolMode::CoreLocal)
+        .build()
+        .unwrap();
+    let local = pool.local();
+    let obj = local.get().await.unwrap();
+    let waiter = {
+        let local = local.clone();
+        tokio::spawn(async move {
+            local
+                .timeout_get(&Timeouts {
+                    wait: Some(Duration::from_secs(1)),
+                    create: None,
+                    recycle: None,
+                })
+                .await
+        })
+    };
+
+    tokio::task::yield_now().await;
+    drop(obj);
+
+    assert_eq!(*waiter.await.unwrap().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn local_waiter_is_woken_by_shared_return_and_close() {
+    let (pool, _) = core_local_pool(1);
+    let shared_obj = pool.get().await.unwrap();
+    let local = pool.local();
+    let waiter = {
+        let local = local.clone();
+        tokio::spawn(async move { local.get().await })
+    };
+
+    tokio::task::yield_now().await;
+    drop(shared_obj);
+    assert_eq!(*waiter.await.unwrap().unwrap(), 0);
+
+    let (pool, _) = core_local_pool(0);
+    let local = pool.local();
+    let waiter = tokio::spawn(async move { local.get().await });
+    tokio::task::yield_now().await;
+    pool.close();
+    assert!(matches!(waiter.await.unwrap(), Err(PoolError::Closed)));
 }
 
 #[tokio::test]
@@ -371,4 +424,23 @@ async fn recycle_hook_errors_discard_local_idle_and_recover_capacity() {
     assert_eq!(*local.get().await.unwrap(), 1);
     assert_eq!(state.detaches.load(Ordering::Relaxed), 1);
     assert_eq!(state.creates.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn post_create_hook_error_recovers_local_capacity() {
+    let manager = TestManager::default();
+    let state = manager.state.clone();
+    let pool = Pool::builder(manager)
+        .max_size(1)
+        .pool_mode(PoolMode::CoreLocal)
+        .post_create(Hook::sync_fn(|_, _| {
+            Err::<(), _>(HookError::message("post create failed"))
+        }))
+        .build()
+        .unwrap();
+    let local = pool.local();
+
+    assert!(local.get().await.is_err());
+    assert_eq!(pool.status().size, 0);
+    assert_eq!(state.detaches.load(Ordering::Relaxed), 1);
 }

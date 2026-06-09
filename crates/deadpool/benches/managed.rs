@@ -120,11 +120,13 @@ fn criterion_benchmark(c: &mut Criterion) {
             b.to_async(&runtime).iter(|| bench_get(cfg))
         });
         #[cfg(feature = "core-local")]
-        group.bench_with_input(
-            BenchmarkId::new("get_core_local", config),
-            &config,
-            |b, &cfg| b.to_async(&runtime).iter(|| bench_get_core_local(cfg)),
-        );
+        if config.pool_size >= config.workers {
+            group.bench_with_input(
+                BenchmarkId::new("get_core_local", config),
+                &config,
+                |b, &cfg| b.to_async(&runtime).iter(|| bench_get_core_local(cfg)),
+            );
+        }
     }
 }
 

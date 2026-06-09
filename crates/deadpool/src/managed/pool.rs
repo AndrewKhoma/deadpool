@@ -170,6 +170,7 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
                     Ok(inner_obj) => inner_obj,
                     Err(err) => {
                         drop(permit);
+                        #[cfg(feature = "core-local")]
                         self.inner.notify_local_waiters();
                         return Err(err);
                     }
@@ -179,6 +180,7 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
                     Ok(inner_obj) => inner_obj,
                     Err(err) => {
                         drop(permit);
+                        #[cfg(feature = "core-local")]
                         self.inner.notify_local_waiters();
                         return Err(err);
                     }

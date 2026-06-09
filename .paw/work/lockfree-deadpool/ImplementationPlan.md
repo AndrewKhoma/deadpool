@@ -41,7 +41,7 @@ Verification will combine existing crate tests, new managed/unmanaged core-local
 
 - [x] **Phase 1: Opt-In API and Storage Abstraction** - Add feature-gated core-local mode surfaces and internal storage boundaries without changing default behavior.
 - [x] **Phase 2: Managed Core-Local Pool Mode** - Implement managed-pool core-local storage integration and managed behavior coverage.
-- [ ] **Phase 3: Unmanaged Core-Local Pool Mode** - Implement unmanaged-pool core-local storage integration and unmanaged behavior coverage.
+- [x] **Phase 3: Unmanaged Core-Local Pool Mode** - Implement unmanaged-pool core-local storage integration and unmanaged behavior coverage.
 - [ ] **Phase 4: PostgreSQL Compatibility and Stress Validation** - Validate reexported PostgreSQL usage, gateway-style expectations, feature combinations, and performance/stress entry points.
 - [ ] **Phase 5: Documentation** - Document opt-in usage, lockfree boundaries, compatibility expectations, and as-built implementation details.
 
@@ -144,21 +144,21 @@ Verification will combine existing crate tests, new managed/unmanaged core-local
 
 #### Automated Verification:
 
-- [ ] Unmanaged tests pass: `cd crates/deadpool && cargo test --all-features --test unmanaged`
-- [ ] Unmanaged timeout tests pass: `cd crates/deadpool && cargo test --all-features --test unmanaged_timeout`
-- [ ] Core all-feature tests pass: `cd crates/deadpool && cargo test --all-features`
-- [ ] Unmanaged benchmark builds: `cd crates/deadpool && cargo bench --bench unmanaged --no-run --all-features`
-- [ ] Unmanaged stress gate command passes: `cd crates/deadpool && cargo test --all-features --test unmanaged_core_local_stress -- --ignored`
-- [ ] Unmanaged stress gate passes with zero observed blocking/parking on the local hot path, p99 checkout latency no worse than shared mode, and throughput no worse than shared mode at 1/8/16/32 workers.
-- [ ] Clippy passes: `cd crates/deadpool && cargo clippy --no-deps --all-features -- -D warnings`
+- [x] Unmanaged tests pass: `cd crates/deadpool && cargo test --all-features --test unmanaged`
+- [x] Unmanaged timeout tests pass: `cd crates/deadpool && cargo test --all-features --test unmanaged_timeout`
+- [x] Core all-feature tests pass: `cd crates/deadpool && cargo test --all-features`
+- [x] Unmanaged benchmark builds: `cd crates/deadpool && cargo bench --bench unmanaged --no-run --all-features`
+- [x] Unmanaged stress gate command passes: `cd crates/deadpool && cargo test --all-features --test unmanaged_core_local_stress -- --ignored`
+- [x] Unmanaged stress gate passes with zero observed blocking/parking on the local hot path, p99 checkout latency no worse than shared mode, and throughput no worse than shared mode at 1/8/16/32 workers.
+- [x] Clippy passes: `cd crates/deadpool && cargo clippy --no-deps --all-features -- -D warnings`
 
 #### Manual Verification:
 
-- [ ] Core-local unmanaged add/get/drop-return loops preserve object count and capacity.
-- [ ] Cross-local return/reclamation behavior is tested for two local handles sharing capacity, including return to origin handle and release when the origin handle is inactive.
-- [ ] `Object::take` releases capacity exactly once in core-local mode.
-- [ ] Status is polled under concurrent checkout/checkin, take/remove, close/drain, resize, and capacity-pressure scenarios, with no panic/underflow and final exact recovery after load drains.
-- [ ] Close and timeout behavior match existing observable outcomes.
+- [x] Core-local unmanaged add/get/drop-return loops preserve object count and capacity.
+- [x] Cross-local return/reclamation behavior is tested for two local handles sharing capacity, including return to origin handle and release when the origin handle is inactive.
+- [x] `Object::take` releases capacity exactly once in core-local mode.
+- [x] Status is polled under concurrent checkout/checkin, take/remove, close/drain, resize, and capacity-pressure scenarios, with no panic/underflow and final exact recovery after load drains.
+- [x] Close and timeout behavior match existing observable outcomes.
 
 ---
 

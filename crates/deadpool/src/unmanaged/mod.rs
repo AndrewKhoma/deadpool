@@ -38,11 +38,16 @@ use std::{
     time::Duration,
 };
 
+#[cfg(feature = "core-local")]
+use std::sync::Weak as StdWeak;
+
 use deadpool_runtime::timeout;
 use tokio::sync::TryAcquireError;
 
 pub use crate::{PoolMode, Status};
 
+#[cfg(feature = "core-local")]
+use self::storage::LocalStorage;
 pub use self::{config::PoolConfig, errors::PoolError};
 
 /// Wrapper around the actual pooled object which implements [`Deref`],
@@ -58,6 +63,10 @@ pub struct Object<T> {
 
     /// Pool to return the pooled object to.
     pool: Weak<PoolInner<T>>,
+
+    /// Local storage this object should return to.
+    #[cfg(feature = "core-local")]
+    local: Option<StdWeak<LocalStorage<T>>>,
 }
 
 impl<T> Object<T> {
@@ -67,8 +76,7 @@ impl<T> Object<T> {
     #[must_use]
     pub fn take(mut this: Self) -> T {
         if let Some(pool) = this.pool.upgrade() {
-            let _ = pool.storage.size().fetch_sub(1, Ordering::Relaxed);
-            pool.storage.size_semaphore().add_permits(1);
+            pool.release_capacity();
         }
         this.obj.take().unwrap()
     }
@@ -78,12 +86,23 @@ impl<T> Drop for Object<T> {
     fn drop(&mut self) {
         if let Some(obj) = self.obj.take() {
             if let Some(pool) = self.pool.upgrade() {
+                #[cfg(feature = "core-local")]
+                if let Some(local) = self.local.as_ref() {
+                    if let Some(local) = local.upgrade() {
+                        pool.return_to_local(&local, obj);
+                    } else {
+                        pool.release_capacity();
+                    }
+                    return;
+                }
                 {
                     let mut queue = pool.storage.queue();
                     queue.push(obj);
                 }
                 let _ = pool.storage.available().fetch_add(1, Ordering::Relaxed);
                 pool.storage.semaphore().add_permits(1);
+                #[cfg(feature = "core-local")]
+                pool.notify_local_waiters();
                 pool.clean_up();
             }
         }
@@ -185,7 +204,10 @@ impl<T> Pool<T> {
     #[cfg_attr(docsrs, doc(cfg(feature = "core-local")))]
     #[must_use]
     pub fn local(&self) -> LocalPool<T> {
-        LocalPool { pool: self.clone() }
+        LocalPool {
+            pool: self.clone(),
+            local: self.inner.storage.register_local(),
+        }
     }
 
     /// Returns the configured [`PoolMode`].
@@ -230,7 +252,32 @@ impl<T> Pool<T> {
         Ok(Object {
             pool: Arc::downgrade(&self.inner),
             obj: Some(obj),
+            #[cfg(feature = "core-local")]
+            local: None,
         })
+    }
+
+    #[cfg(feature = "core-local")]
+    fn try_get_for_local(&self, local: &Arc<LocalStorage<T>>) -> Result<Object<T>, PoolError> {
+        if let Some(obj) = local.pop() {
+            return Ok(self.wrap_object(obj, Some(Arc::downgrade(local))));
+        }
+        let inner = self.inner.as_ref();
+        let permit = inner
+            .storage
+            .semaphore()
+            .try_acquire()
+            .map_err(|e| match e {
+                TryAcquireError::NoPermits => PoolError::Timeout,
+                TryAcquireError::Closed => PoolError::Closed,
+            })?;
+        let obj = {
+            let mut queue = inner.storage.queue();
+            queue.pop().unwrap()
+        };
+        permit.forget();
+        let _ = inner.storage.available().fetch_sub(1, Ordering::Relaxed);
+        Ok(self.wrap_object(obj, Some(Arc::downgrade(local))))
     }
 
     /// Retrieves an [`Object`] from this [`Pool`] using a different `timeout`
@@ -273,7 +320,50 @@ impl<T> Pool<T> {
         Ok(Object {
             pool: Arc::downgrade(&self.inner),
             obj: Some(obj),
+            #[cfg(feature = "core-local")]
+            local: None,
         })
+    }
+
+    #[cfg(feature = "core-local")]
+    async fn timeout_get_for_local(
+        &self,
+        duration: Option<Duration>,
+        local: &Arc<LocalStorage<T>>,
+    ) -> Result<Object<T>, PoolError> {
+        loop {
+            if let Some(obj) = local.pop() {
+                return Ok(self.wrap_object(obj, Some(Arc::downgrade(local))));
+            }
+
+            match self.try_get_for_local(local) {
+                Ok(obj) => return Ok(obj),
+                Err(PoolError::Timeout) => {
+                    if duration.is_some_and(|duration| duration.as_nanos() == 0) {
+                        return Err(PoolError::Timeout);
+                    }
+                    if let Some(obj) = self.wait_for_local_object(duration, local).await? {
+                        return Ok(self.wrap_object(obj, Some(Arc::downgrade(local))));
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+
+    #[cfg(feature = "core-local")]
+    async fn wait_for_local_object(
+        &self,
+        duration: Option<Duration>,
+        local: &LocalStorage<T>,
+    ) -> Result<Option<T>, PoolError> {
+        match (duration, self.inner.config.runtime) {
+            (None, _) => Ok(local.pop_wait().await),
+            (Some(duration), Some(runtime)) => timeout(runtime, duration, local.pop_wait())
+                .await
+                .ok_or(PoolError::Timeout),
+            (Some(_), None) => Err(PoolError::NoRuntimeSpecified),
+        }
     }
 
     /// Adds an `object` to this [`Pool`].
@@ -290,6 +380,25 @@ impl<T> Pool<T> {
             Ok(permit) => {
                 permit.forget();
                 self._add(object);
+                Ok(())
+            }
+            Err(_) => Err((object, PoolError::Closed)),
+        }
+    }
+
+    #[cfg(feature = "core-local")]
+    async fn add_to_local(
+        &self,
+        object: T,
+        local: &Arc<LocalStorage<T>>,
+    ) -> Result<(), (T, PoolError)> {
+        match self.inner.storage.size_semaphore().acquire().await {
+            Ok(permit) => {
+                if let Err(object) = local.push(object) {
+                    return Err((object, PoolError::Closed));
+                }
+                permit.forget();
+                let _ = self.inner.storage.size().fetch_add(1, Ordering::Relaxed);
                 Ok(())
             }
             Err(_) => Err((object, PoolError::Closed)),
@@ -317,6 +426,28 @@ impl<T> Pool<T> {
         }
     }
 
+    #[cfg(feature = "core-local")]
+    fn try_add_to_local(
+        &self,
+        object: T,
+        local: &Arc<LocalStorage<T>>,
+    ) -> Result<(), (T, PoolError)> {
+        match self.inner.storage.size_semaphore().try_acquire() {
+            Ok(permit) => {
+                if let Err(object) = local.push(object) {
+                    return Err((object, PoolError::Closed));
+                }
+                permit.forget();
+                let _ = self.inner.storage.size().fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => Err(match e {
+                TryAcquireError::NoPermits => (object, PoolError::Timeout),
+                TryAcquireError::Closed => (object, PoolError::Closed),
+            }),
+        }
+    }
+
     /// Internal function which adds an `object` to this [`Pool`].
     ///
     /// Prior calling this it must be guaranteed that `size` doesn't exceed
@@ -334,6 +465,8 @@ impl<T> Pool<T> {
             .available()
             .fetch_add(1, Ordering::Relaxed);
         self.inner.storage.semaphore().add_permits(1);
+        #[cfg(feature = "core-local")]
+        self.inner.notify_local_waiters();
     }
 
     /// Removes an [`Object`] from this [`Pool`].
@@ -359,6 +492,8 @@ impl<T> Pool<T> {
     pub fn close(&self) {
         self.inner.storage.semaphore().close();
         self.inner.storage.size_semaphore().close();
+        #[cfg(feature = "core-local")]
+        self.inner.close_local_storages();
         self.inner.clear();
     }
 
@@ -373,15 +508,32 @@ impl<T> Pool<T> {
         let max_size = self.inner.config.max_size;
         let size = self.inner.storage.size().load(Ordering::Relaxed);
         let available = self.inner.storage.available().load(Ordering::Relaxed);
+        #[cfg(feature = "core-local")]
+        let local_available = self.inner.storage.local_available();
+        #[cfg(not(feature = "core-local"))]
+        let local_available = 0;
+        #[cfg(feature = "core-local")]
+        let local_waiting = self.inner.storage.local_waiting();
+        #[cfg(not(feature = "core-local"))]
+        let local_waiting = 0;
         Status {
             max_size,
             size,
-            available: if available > 0 { available as usize } else { 0 },
+            available: (if available > 0 { available as usize } else { 0 }) + local_available,
             waiting: if available < 0 {
                 (-available) as usize
             } else {
                 0
-            },
+            } + local_waiting,
+        }
+    }
+
+    #[cfg(feature = "core-local")]
+    fn wrap_object(&self, obj: T, local: Option<StdWeak<LocalStorage<T>>>) -> Object<T> {
+        Object {
+            pool: Arc::downgrade(&self.inner),
+            obj: Some(obj),
+            local,
         }
     }
 }
@@ -416,6 +568,42 @@ impl<T> PoolInner<T> {
             .available()
             .fetch_sub(queue.len() as isize, Ordering::Relaxed);
         queue.clear();
+    }
+
+    fn release_capacity(&self) {
+        let _ = self.storage.size().fetch_sub(1, Ordering::Relaxed);
+        if !self.storage.size_semaphore().is_closed() {
+            self.storage.size_semaphore().add_permits(1);
+            #[cfg(feature = "core-local")]
+            self.notify_local_waiters();
+        }
+    }
+
+    #[cfg(feature = "core-local")]
+    fn return_to_local(&self, local: &LocalStorage<T>, obj: T) {
+        if self.is_closed() {
+            self.release_capacity();
+        } else if let Err(_obj) = local.push(obj) {
+            self.release_capacity();
+        }
+        self.clean_up();
+    }
+
+    #[cfg(feature = "core-local")]
+    fn close_local_storages(&self) {
+        for local in self.storage.local_storages() {
+            local.close();
+            for _obj in local.drain() {
+                self.release_capacity();
+            }
+        }
+    }
+
+    #[cfg(feature = "core-local")]
+    fn notify_local_waiters(&self) {
+        for local in self.storage.local_storages() {
+            local.signal();
+        }
     }
 
     /// Indicates whether this [`Pool`] has been closed.
@@ -465,9 +653,50 @@ impl<T> Pool<T> {
 /// delegating to the backing pool storage.
 #[cfg(feature = "core-local")]
 #[cfg_attr(docsrs, doc(cfg(feature = "core-local")))]
-#[derive(Clone, Debug)]
 pub struct LocalPool<T> {
     pool: Pool<T>,
+    local: Option<Arc<LocalStorage<T>>>,
+}
+
+#[cfg(feature = "core-local")]
+impl<T> Clone for LocalPool<T> {
+    fn clone(&self) -> Self {
+        if let Some(local) = &self.local {
+            local.clone_owner();
+        }
+        Self {
+            pool: self.pool.clone(),
+            local: self.local.clone(),
+        }
+    }
+}
+
+#[cfg(feature = "core-local")]
+impl<T> std::fmt::Debug for LocalPool<T>
+where
+    T: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalPool")
+            .field("pool", &self.pool)
+            .field("local", &self.local)
+            .finish()
+    }
+}
+
+#[cfg(feature = "core-local")]
+impl<T> Drop for LocalPool<T> {
+    fn drop(&mut self) {
+        let Some(local) = &self.local else {
+            return;
+        };
+        if local.release_owner() {
+            local.close();
+            for _obj in local.drain() {
+                self.pool.inner.release_capacity();
+            }
+        }
+    }
 }
 
 #[cfg(feature = "core-local")]
@@ -492,7 +721,7 @@ impl<T> LocalPool<T> {
     ///
     /// See [`PoolError`] for details.
     pub async fn get(&self) -> Result<Object<T>, PoolError> {
-        self.pool.get().await
+        self.timeout_get(self.pool.inner.config.timeout).await
     }
 
     /// Retrieves an [`Object`] from this local handle without waiting.
@@ -503,7 +732,10 @@ impl<T> LocalPool<T> {
     ///
     /// See [`PoolError`] for details.
     pub fn try_get(&self) -> Result<Object<T>, PoolError> {
-        self.pool.try_get()
+        match &self.local {
+            Some(local) => self.pool.try_get_for_local(local),
+            None => self.pool.try_get(),
+        }
     }
 
     /// Retrieves an [`Object`] from this local handle using a custom timeout.
@@ -514,7 +746,10 @@ impl<T> LocalPool<T> {
     ///
     /// See [`PoolError`] for details.
     pub async fn timeout_get(&self, duration: Option<Duration>) -> Result<Object<T>, PoolError> {
-        self.pool.timeout_get(duration).await
+        match &self.local {
+            Some(local) => self.pool.timeout_get_for_local(duration, local).await,
+            None => self.pool.timeout_get(duration).await,
+        }
     }
 
     /// Adds an object through this local handle.
@@ -523,7 +758,10 @@ impl<T> LocalPool<T> {
     ///
     /// See [`PoolError`] for details.
     pub async fn add(&self, object: T) -> Result<(), (T, PoolError)> {
-        self.pool.add(object).await
+        match &self.local {
+            Some(local) => self.pool.add_to_local(object, local).await,
+            None => self.pool.add(object).await,
+        }
     }
 
     /// Tries to add an object through this local handle.
@@ -532,7 +770,10 @@ impl<T> LocalPool<T> {
     ///
     /// See [`PoolError`] for details.
     pub fn try_add(&self, object: T) -> Result<(), (T, PoolError)> {
-        self.pool.try_add(object)
+        match &self.local {
+            Some(local) => self.pool.try_add_to_local(object, local),
+            None => self.pool.try_add(object),
+        }
     }
 
     /// Removes an [`Object`] through this local handle.
@@ -541,7 +782,7 @@ impl<T> LocalPool<T> {
     ///
     /// See [`PoolError`] for details.
     pub async fn remove(&self) -> Result<T, PoolError> {
-        self.pool.remove().await
+        self.get().await.map(Object::take)
     }
 
     /// Tries to remove an [`Object`] through this local handle.
@@ -550,7 +791,7 @@ impl<T> LocalPool<T> {
     ///
     /// See [`PoolError`] for details.
     pub fn try_remove(&self) -> Result<T, PoolError> {
-        self.pool.try_remove()
+        self.try_get().map(Object::take)
     }
 
     /// Removes an [`Object`] through this local handle using a custom timeout.
@@ -559,7 +800,7 @@ impl<T> LocalPool<T> {
     ///
     /// See [`PoolError`] for details.
     pub async fn timeout_remove(&self, timeout: Option<Duration>) -> Result<T, PoolError> {
-        self.pool.timeout_remove(timeout).await
+        self.timeout_get(timeout).await.map(Object::take)
     }
 
     /// Closes the backing [`Pool`].
@@ -577,5 +818,12 @@ impl<T> LocalPool<T> {
     #[must_use]
     pub fn status(&self) -> Status {
         self.pool.status()
+    }
+
+    /// Returns how often this local handle had to wait for local availability.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn local_wait_count(&self) -> usize {
+        self.local.as_ref().map_or(0, |local| local.waits())
     }
 }

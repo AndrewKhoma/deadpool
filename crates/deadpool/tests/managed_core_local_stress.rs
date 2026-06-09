@@ -159,7 +159,13 @@ async fn capacity_pressure_reuses_returned_local_object() {
         })
     };
 
-    tokio::task::yield_now().await;
+    for _ in 0..100 {
+        if local.local_wait_count() > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+    assert!(local.local_wait_count() > 0);
     drop(checked_out);
     let (waits, object) = waiter.await.unwrap();
     drop(object);

@@ -712,6 +712,9 @@ pub struct LocalPool<M: Manager, W: From<Object<M>> = Object<M>> {
 #[cfg(feature = "core-local")]
 impl<M: Manager, W: From<Object<M>>> Clone for LocalPool<M, W> {
     fn clone(&self) -> Self {
+        if let Some(local) = &self.local {
+            local.clone_owner();
+        }
         Self {
             pool: self.pool.clone(),
             local: self.local.clone(),
@@ -725,7 +728,7 @@ impl<M: Manager, W: From<Object<M>>> Drop for LocalPool<M, W> {
         let Some(local) = &self.local else {
             return;
         };
-        if Arc::strong_count(local) == 1 {
+        if local.release_owner() {
             local.close();
             self.pool.inner.drain_local_storage(local);
         }

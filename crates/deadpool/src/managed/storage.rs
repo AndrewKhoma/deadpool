@@ -172,6 +172,7 @@ pub(crate) struct LocalStorage<T> {
     queue: SegQueue<T>,
     available: AtomicUsize,
     waits: AtomicUsize,
+    owners: AtomicUsize,
     active: AtomicBool,
     semaphore: Semaphore,
 }
@@ -183,6 +184,7 @@ impl<T> Default for LocalStorage<T> {
             queue: SegQueue::new(),
             available: AtomicUsize::new(0),
             waits: AtomicUsize::new(0),
+            owners: AtomicUsize::new(1),
             active: AtomicBool::new(true),
             semaphore: Semaphore::new(0),
         }
@@ -231,6 +233,14 @@ impl<T> LocalStorage<T> {
     pub(crate) fn close(&self) {
         self.active.store(false, Ordering::Relaxed);
         self.semaphore.close();
+    }
+
+    pub(crate) fn clone_owner(&self) {
+        let _ = self.owners.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn release_owner(&self) -> bool {
+        self.owners.fetch_sub(1, Ordering::AcqRel) == 1
     }
 
     pub(crate) fn waits(&self) -> usize {

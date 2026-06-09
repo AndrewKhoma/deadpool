@@ -38,6 +38,13 @@ mod managed_api {
     }
 
     #[test]
+    fn generated_reexports_include_local_pool_alias() {
+        type BackendLocalPool = managed::LocalPool<Manager>;
+        fn assert_alias(_: Option<BackendLocalPool>) {}
+        assert_alias(None);
+    }
+
+    #[test]
     fn default_builder_uses_shared_mode() {
         let pool = managed::Pool::<Manager>::builder(Manager).build().unwrap();
         assert_eq!(pool.pool_mode(), PoolMode::Shared);

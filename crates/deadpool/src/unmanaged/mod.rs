@@ -33,17 +33,13 @@ mod errors;
 mod storage;
 
 use std::{
-    convert::TryInto,
     ops::{Deref, DerefMut},
-    sync::{
-        Arc, Mutex, Weak,
-        atomic::{AtomicIsize, AtomicUsize, Ordering},
-    },
+    sync::{Arc, Weak, atomic::Ordering},
     time::Duration,
 };
 
 use deadpool_runtime::timeout;
-use tokio::sync::{Semaphore, TryAcquireError};
+use tokio::sync::TryAcquireError;
 
 pub use crate::{PoolMode, Status};
 
@@ -71,8 +67,8 @@ impl<T> Object<T> {
     #[must_use]
     pub fn take(mut this: Self) -> T {
         if let Some(pool) = this.pool.upgrade() {
-            let _ = pool.size.fetch_sub(1, Ordering::Relaxed);
-            pool.size_semaphore.add_permits(1);
+            let _ = pool.storage.size().fetch_sub(1, Ordering::Relaxed);
+            pool.storage.size_semaphore().add_permits(1);
         }
         this.obj.take().unwrap()
     }
@@ -83,11 +79,11 @@ impl<T> Drop for Object<T> {
         if let Some(obj) = self.obj.take() {
             if let Some(pool) = self.pool.upgrade() {
                 {
-                    let mut queue = pool.queue.lock().unwrap();
+                    let mut queue = pool.storage.queue();
                     queue.push(obj);
                 }
-                let _ = pool.available.fetch_add(1, Ordering::Relaxed);
-                pool.semaphore.add_permits(1);
+                let _ = pool.storage.available().fetch_add(1, Ordering::Relaxed);
+                pool.storage.semaphore().add_permits(1);
                 pool.clean_up();
             }
         }
@@ -176,12 +172,7 @@ impl<T> Pool<T> {
         Self {
             inner: Arc::new(PoolInner {
                 config: *config,
-                queue: Mutex::new(Vec::with_capacity(config.max_size)),
-                size: AtomicUsize::new(0),
-                size_semaphore: Semaphore::new(config.max_size),
-                available: AtomicIsize::new(0),
-                semaphore: Semaphore::new(0),
-                storage_mode: mode.into(),
+                storage: storage::PoolStorage::empty(mode, config.max_size),
             }),
         }
     }
@@ -201,7 +192,7 @@ impl<T> Pool<T> {
     /// Returns the configured [`PoolMode`].
     #[must_use]
     pub fn pool_mode(&self) -> PoolMode {
-        self.inner.storage_mode.pool_mode()
+        self.inner.storage.pool_mode()
     }
 
     /// Retrieves an [`Object`] from this [`Pool`] or waits for the one to
@@ -223,16 +214,20 @@ impl<T> Pool<T> {
     /// See [`PoolError`] for details.
     pub fn try_get(&self) -> Result<Object<T>, PoolError> {
         let inner = self.inner.as_ref();
-        let permit = inner.semaphore.try_acquire().map_err(|e| match e {
-            TryAcquireError::NoPermits => PoolError::Timeout,
-            TryAcquireError::Closed => PoolError::Closed,
-        })?;
+        let permit = inner
+            .storage
+            .semaphore()
+            .try_acquire()
+            .map_err(|e| match e {
+                TryAcquireError::NoPermits => PoolError::Timeout,
+                TryAcquireError::Closed => PoolError::Closed,
+            })?;
         let obj = {
-            let mut queue = inner.queue.lock().unwrap();
+            let mut queue = inner.storage.queue();
             queue.pop().unwrap()
         };
         permit.forget();
-        let _ = inner.available.fetch_sub(1, Ordering::Relaxed);
+        let _ = inner.storage.available().fetch_sub(1, Ordering::Relaxed);
         Ok(Object {
             pool: Arc::downgrade(&self.inner),
             obj: Some(obj),
@@ -249,18 +244,21 @@ impl<T> Pool<T> {
         let inner = self.inner.as_ref();
         let permit = match (duration, inner.config.runtime) {
             (None, _) => inner
-                .semaphore
+                .storage
+                .semaphore()
                 .acquire()
                 .await
                 .map_err(|_| PoolError::Closed),
-            (Some(duration), _) if duration.as_nanos() == 0 => {
-                inner.semaphore.try_acquire().map_err(|e| match e {
+            (Some(duration), _) if duration.as_nanos() == 0 => inner
+                .storage
+                .semaphore()
+                .try_acquire()
+                .map_err(|e| match e {
                     TryAcquireError::NoPermits => PoolError::Timeout,
                     TryAcquireError::Closed => PoolError::Closed,
-                })
-            }
+                }),
             (Some(duration), Some(runtime)) => {
-                timeout(runtime, duration, inner.semaphore.acquire())
+                timeout(runtime, duration, inner.storage.semaphore().acquire())
                     .await
                     .ok_or(PoolError::Timeout)?
                     .map_err(|_| PoolError::Closed)
@@ -268,11 +266,11 @@ impl<T> Pool<T> {
             (Some(_), None) => Err(PoolError::NoRuntimeSpecified),
         }?;
         let obj = {
-            let mut queue = inner.queue.lock().unwrap();
+            let mut queue = inner.storage.queue();
             queue.pop().unwrap()
         };
         permit.forget();
-        let _ = inner.available.fetch_sub(1, Ordering::Relaxed);
+        let _ = inner.storage.available().fetch_sub(1, Ordering::Relaxed);
         Ok(Object {
             pool: Arc::downgrade(&self.inner),
             obj: Some(obj),
@@ -289,7 +287,7 @@ impl<T> Pool<T> {
     /// If the [`Pool`] has been closed a tuple containing the `object` and
     /// the [`PoolError`] is returned instead.
     pub async fn add(&self, object: T) -> Result<(), (T, PoolError)> {
-        match self.inner.size_semaphore.acquire().await {
+        match self.inner.storage.size_semaphore().acquire().await {
             Ok(permit) => {
                 permit.forget();
                 self._add(object);
@@ -307,7 +305,7 @@ impl<T> Pool<T> {
     /// has been closed, then a tuple containing the `object` and the
     /// [`PoolError`] is returned instead.
     pub fn try_add(&self, object: T) -> Result<(), (T, PoolError)> {
-        match self.inner.size_semaphore.try_acquire() {
+        match self.inner.storage.size_semaphore().try_acquire() {
             Ok(permit) => {
                 permit.forget();
                 self._add(object);
@@ -326,13 +324,17 @@ impl<T> Pool<T> {
     /// `max_size`. In the methods `add` and `try_add` this is ensured by using
     /// the `size_semaphore`.
     fn _add(&self, object: T) {
-        let _ = self.inner.size.fetch_add(1, Ordering::Relaxed);
+        let _ = self.inner.storage.size().fetch_add(1, Ordering::Relaxed);
         {
-            let mut queue = self.inner.queue.lock().unwrap();
+            let mut queue = self.inner.storage.queue();
             queue.push(object);
         }
-        let _ = self.inner.available.fetch_add(1, Ordering::Relaxed);
-        self.inner.semaphore.add_permits(1);
+        let _ = self
+            .inner
+            .storage
+            .available()
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner.storage.semaphore().add_permits(1);
     }
 
     /// Removes an [`Object`] from this [`Pool`].
@@ -356,8 +358,8 @@ impl<T> Pool<T> {
     /// All current and future tasks waiting for [`Object`]s will return
     /// [`PoolError::Closed`] immediately.
     pub fn close(&self) {
-        self.inner.semaphore.close();
-        self.inner.size_semaphore.close();
+        self.inner.storage.semaphore().close();
+        self.inner.storage.size_semaphore().close();
         self.inner.clear();
     }
 
@@ -370,8 +372,8 @@ impl<T> Pool<T> {
     #[must_use]
     pub fn status(&self) -> Status {
         let max_size = self.inner.config.max_size;
-        let size = self.inner.size.load(Ordering::Relaxed);
-        let available = self.inner.available.load(Ordering::Relaxed);
+        let size = self.inner.storage.size().load(Ordering::Relaxed);
+        let available = self.inner.storage.available().load(Ordering::Relaxed);
         Status {
             max_size,
             size,
@@ -388,21 +390,7 @@ impl<T> Pool<T> {
 #[derive(Debug)]
 struct PoolInner<T> {
     config: PoolConfig,
-    queue: Mutex<Vec<T>>,
-    size: AtomicUsize,
-    /// This semaphore has as many permits as `max_size - size`. Every time
-    /// an [`Object`] is added to the [`Pool`] a permit is removed from the
-    /// semaphore and every time an [`Object`] is removed a permit is returned
-    /// back.
-    size_semaphore: Semaphore,
-    /// Number of available [`Object`]s in the [`Pool`]. If there are no
-    /// [`Object`]s in the [`Pool`] this number can become negative and store
-    /// the number of [`Future`]s waiting for an [`Object`].
-    ///
-    /// [`Future`]: std::future::Future
-    available: AtomicIsize,
-    semaphore: Semaphore,
-    storage_mode: storage::StorageMode,
+    storage: storage::PoolStorage<T>,
 }
 
 impl<T> PoolInner<T> {
@@ -419,10 +407,14 @@ impl<T> PoolInner<T> {
 
     /// Removes all the [`Object`]s which are currently part of this [`Pool`].
     fn clear(&self) {
-        let mut queue = self.queue.lock().unwrap();
-        let _ = self.size.fetch_sub(queue.len(), Ordering::Relaxed);
+        let mut queue = self.storage.queue();
         let _ = self
-            .available
+            .storage
+            .size()
+            .fetch_sub(queue.len(), Ordering::Relaxed);
+        let _ = self
+            .storage
+            .available()
             .fetch_sub(queue.len() as isize, Ordering::Relaxed);
         queue.clear();
     }
@@ -430,7 +422,7 @@ impl<T> PoolInner<T> {
     /// Indicates whether this [`Pool`] has been closed.
     fn is_closed(&self) -> bool {
         matches!(
-            self.semaphore.try_acquire_many(0),
+            self.storage.semaphore().try_acquire_many(0),
             Err(TryAcquireError::Closed)
         )
     }
@@ -461,13 +453,8 @@ impl<T> Pool<T> {
         let len = queue.len();
         Self {
             inner: Arc::new(PoolInner {
-                queue: Mutex::new(queue),
                 config: PoolConfig::new(len),
-                size: AtomicUsize::new(len),
-                size_semaphore: Semaphore::new(0),
-                available: AtomicIsize::new(len.try_into().unwrap()),
-                semaphore: Semaphore::new(len),
-                storage_mode: mode.into(),
+                storage: storage::PoolStorage::from_queue(mode, queue, len),
             }),
         }
     }

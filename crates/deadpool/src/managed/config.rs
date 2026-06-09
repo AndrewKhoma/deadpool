@@ -5,8 +5,11 @@ use super::BuildError;
 /// [`Pool`] configuration.
 ///
 /// Storage mode selection is configured through [`PoolBuilder`] methods rather
-/// than stored in this public field-based config type.
+/// than stored in this public field-based config type. Builders use
+/// [`PoolMode::Shared`] unless [`PoolMode::CoreLocal`] is selected explicitly.
 ///
+/// [`PoolMode::CoreLocal`]: crate::PoolMode::CoreLocal
+/// [`PoolMode::Shared`]: crate::PoolMode::Shared
 /// [`Pool`]: super::Pool
 /// [`PoolBuilder`]: super::PoolBuilder
 #[derive(Clone, Copy, Debug)]

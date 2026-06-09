@@ -179,9 +179,8 @@ impl<T> Pool<T> {
 
     /// Creates a local handle for this pool.
     ///
-    /// In [`PoolMode::Shared`], the handle delegates to the shared pool. In
-    /// [`PoolMode::CoreLocal`], later phases attach core-local storage to this
-    /// handle while preserving the same public API surface.
+    /// Unmanaged local handles currently delegate to the backing pool in both
+    /// [`PoolMode::Shared`] and [`PoolMode::CoreLocal`].
     #[cfg(feature = "core-local")]
     #[cfg_attr(docsrs, doc(cfg(feature = "core-local")))]
     #[must_use]
@@ -462,9 +461,8 @@ impl<T> Pool<T> {
 
 /// Local handle for an unmanaged [`Pool`].
 ///
-/// Local handles are the opt-in API surface for core-local storage. Phase 1
-/// keeps this handle delegating to the existing shared storage; later phases
-/// attach local idle ownership behind the same type.
+/// Unmanaged local handles provide the same public API as [`Pool`] while
+/// delegating to the backing pool storage.
 #[cfg(feature = "core-local")]
 #[cfg_attr(docsrs, doc(cfg(feature = "core-local")))]
 #[derive(Clone, Debug)]
@@ -488,7 +486,7 @@ impl<T> LocalPool<T> {
 
     /// Retrieves an [`Object`] from this local handle.
     ///
-    /// Phase 1 delegates to [`Pool::get`].
+    /// Delegates to [`Pool::get`].
     ///
     /// # Errors
     ///
@@ -499,7 +497,7 @@ impl<T> LocalPool<T> {
 
     /// Retrieves an [`Object`] from this local handle without waiting.
     ///
-    /// Phase 1 delegates to [`Pool::try_get`].
+    /// Delegates to [`Pool::try_get`].
     ///
     /// # Errors
     ///
@@ -510,7 +508,7 @@ impl<T> LocalPool<T> {
 
     /// Retrieves an [`Object`] from this local handle using a custom timeout.
     ///
-    /// Phase 1 delegates to [`Pool::timeout_get`].
+    /// Delegates to [`Pool::timeout_get`].
     ///
     /// # Errors
     ///

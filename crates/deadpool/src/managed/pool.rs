@@ -93,8 +93,10 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
     /// Creates a local handle for this pool.
     ///
     /// In [`PoolMode::Shared`], the handle delegates to the shared pool. In
-    /// [`PoolMode::CoreLocal`], later phases attach core-local storage to this
-    /// handle while preserving the same public API surface.
+    /// [`PoolMode::CoreLocal`], the handle owns a local FIFO queue for
+    /// same-handle returns while sharing global capacity with the backing pool.
+    /// The configured [`QueueMode`] only applies to objects retrieved from the
+    /// shared fallback queue.
     #[cfg(feature = "core-local")]
     #[cfg_attr(docsrs, doc(cfg(feature = "core-local")))]
     #[must_use]
@@ -731,7 +733,9 @@ impl<M: Manager, W: From<Object<M>>> LocalPool<M, W> {
 
     /// Retrieves an [`Object`] from this local handle.
     ///
-    /// Phase 1 delegates to [`Pool::get`].
+    /// In [`PoolMode::CoreLocal`], this first checks the handle's local FIFO
+    /// queue and otherwise uses shared pool capacity. In [`PoolMode::Shared`],
+    /// this delegates to [`Pool::get`].
     ///
     /// # Errors
     ///
@@ -742,7 +746,10 @@ impl<M: Manager, W: From<Object<M>>> LocalPool<M, W> {
 
     /// Retrieves an [`Object`] from this local handle using custom timeouts.
     ///
-    /// Phase 1 delegates to [`Pool::timeout_get`].
+    /// In [`PoolMode::CoreLocal`], this first checks the handle's local FIFO
+    /// queue and otherwise uses shared pool capacity with the supplied
+    /// `timeouts`. In [`PoolMode::Shared`], this delegates to
+    /// [`Pool::timeout_get`].
     ///
     /// # Errors
     ///

@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bump up MSRV to `1.85` and Rust edition to `2024`
 - Re-export `tokio_postgres` features
 - Update `tokio-postgres` dependency to version `0.7.14`
-- Forward the `core-local` feature from `deadpool`.
+- Forward the `core-local` feature from `deadpool` and document PostgreSQL builder opt-in.
 
 ## [0.14.1] - 2024-12-18
 

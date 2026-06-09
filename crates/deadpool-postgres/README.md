@@ -128,8 +128,33 @@ async fn main() {
 }
 ```
 
-With the `core-local` feature enabled, use `PoolBuilder::pool_mode(PoolMode::CoreLocal)`
-and `pool.local()` to create explicit local handles backed by shared capacity.
+## Core-local PostgreSQL pools
+
+With the `core-local` feature enabled, this crate forwards
+`deadpool/core-local` and reexports `PoolMode` and `LocalPool`. The default pool
+mode remains shared. Opt in through the builder and create explicit local
+handles backed by shared capacity:
+
+```rust,ignore
+use deadpool_postgres::{Config, PoolMode};
+use tokio_postgres::NoTls;
+
+let cfg = Config::new();
+let pool = cfg
+    .builder(NoTls)
+    .unwrap()
+    .pool_mode(PoolMode::CoreLocal)
+    .build()
+    .unwrap();
+let local = pool.local();
+```
+
+Use one local handle per core-affine worker or shard and keep PostgreSQL client
+checkout/checkin on that handle where possible. Shared fallback, connection
+creation, recycling, statement-cache lifecycle, status, close/drain and error
+handling keep their existing synchronization boundaries. Roll out behind
+configuration, compare latency, checkout timeouts and pool `Status` with
+shared-mode baselines, and fall back by selecting `PoolMode::Shared`.
 
 ## FAQ
 

@@ -10,7 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Remove `num_cpus` dependency
-- Add opt-in `core-local` pool mode with explicit local handles for managed and unmanaged pools.
+- Add opt-in `core-local` pool mode with explicit local handles for managed and unmanaged pools,
+  including usage and compatibility documentation.
 
 ## [0.13.0] - 2026-02-17
 

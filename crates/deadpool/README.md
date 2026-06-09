@@ -157,6 +157,30 @@ things a little different and that is the main reason for it to exist:
   shared fallback, lifecycle operations, creation, recycling, status and close
   keep their existing synchronization boundaries.
 
+## Core-local pool mode
+
+`PoolMode::Shared` remains the default behavior. With the `core-local` feature
+enabled, managed pools can opt in with
+`Pool::builder(manager).pool_mode(PoolMode::CoreLocal)` or `.core_local()`;
+unmanaged pools can use `Pool::new_with_mode`, `Pool::from_config_with_mode` or
+`Pool::from_iter_with_mode`.
+
+Applications create explicit `LocalPool` handles with `pool.local()` and should
+keep checkout/checkin on the same handle, for example one handle per core,
+shard or thread-per-core executor lane. Objects returned after their origin
+local handle is gone release capacity instead of preserving local affinity.
+
+The lock-free steady-state boundary is same-handle checkout/checkin from a
+populated local queue. Shared fallback, object creation, recycling, resizing,
+status snapshots, close/drain and error recovery still use the existing
+synchronization. `QueueMode::Fifo` and `QueueMode::Lifo` apply to shared
+fallback only; local queues are FIFO and core-local mode does not add strict
+waiter fairness or global ordering.
+
+Roll core-local mode out behind configuration, compare latency, checkout
+timeouts, recycle/create failures and `Status` values with shared-mode
+benchmarks or stress tests, and switch back to `PoolMode::Shared` if locality or
+load balance is not stable.
 
 ## Unmanaged pool
 

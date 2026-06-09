@@ -72,6 +72,15 @@ Create one local handle per core, shard, or thread-per-core executor lane and ke
 
 Use `PoolMode::Shared` as the rollback path if a deployment observes imbalance, unexpected local-handle churn, or runtime behavior that does not preserve intended affinity.
 
+### Rollout, Monitoring, and Fallback
+
+Adopt core-local mode in stages: enable the feature, switch one pool or one
+traffic slice to `PoolMode::CoreLocal`, then compare latency, checkout
+timeouts, recycle/create failures, and `Status` values against the shared-mode
+baseline. Run the stress tests and benchmark no-run checks before expanding the
+rollout. Fall back by selecting `PoolMode::Shared` in the builder or by
+disabling the `core-local` feature.
+
 ## API Reference
 
 ### Key Components
@@ -109,6 +118,11 @@ PostgreSQL checks:
 ### Edge Cases
 
 Tests cover local returns, cross-handle visibility, local handle drop, object take/detach, close/drain, timeout behavior, resize, retain, create/recycle failure, hook failure, status under load, and shared-vs-core-local stress gates.
+
+Benchmark/stress validation is expected for gateway-style deployments because
+core-local mode trades global queue ordering for local-handle affinity. Compare
+core-local and shared-mode results before treating the local path as a
+production default.
 
 ## Limitations and Future Work
 

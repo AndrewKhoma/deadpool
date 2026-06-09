@@ -187,9 +187,25 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
     ) -> Result<W, PoolError<M::Error>> {
         loop {
             let Some(inner_obj) = local.pop() else {
-                return self
-                    .timeout_get_with_local_return(timeouts, Some(Arc::downgrade(local)))
-                    .await;
+                let mut try_timeouts = *timeouts;
+                try_timeouts.wait = Some(Duration::from_millis(0));
+                match self
+                    .timeout_get_with_local_return(&try_timeouts, Some(Arc::downgrade(local)))
+                    .await
+                {
+                    Ok(obj) => return Ok(obj),
+                    Err(PoolError::Timeout(TimeoutType::Wait)) => {
+                        if timeouts
+                            .wait
+                            .is_some_and(|duration| duration.as_nanos() == 0)
+                        {
+                            return Err(PoolError::Timeout(TimeoutType::Wait));
+                        }
+                        self.wait_for_local_object(timeouts, local).await?;
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                }
             };
             let _ = self.inner.users.fetch_add(1, Ordering::Relaxed);
             let users_guard = DropGuard(|| {
@@ -202,6 +218,30 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
                     .into());
             }
         }
+    }
+
+    #[cfg(feature = "core-local")]
+    async fn wait_for_local_object(
+        &self,
+        timeouts: &Timeouts,
+        local: &LocalStorage<ObjectInner<M>>,
+    ) -> Result<(), PoolError<M::Error>> {
+        let _ = self.inner.users.fetch_add(1, Ordering::Relaxed);
+        let users_guard = DropGuard(|| {
+            let _ = self.inner.users.fetch_sub(1, Ordering::Relaxed);
+        });
+        let result = match (self.inner.runtime, timeouts.wait) {
+            (_, None) => {
+                local.notified().await;
+                Ok(())
+            }
+            (Some(runtime), Some(duration)) => timeout(runtime, duration, local.notified())
+                .await
+                .ok_or(PoolError::Timeout(TimeoutType::Wait)),
+            (None, Some(_)) => Err(PoolError::NoRuntimeSpecified),
+        };
+        drop(users_guard);
+        result
     }
 
     #[cfg(feature = "core-local")]
@@ -432,6 +472,9 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
             let additional = slots.max_size - old_max_size;
             slots.vec.reserve_exact(additional);
             self.inner.storage.semaphore().add_permits(additional);
+            drop(slots);
+            #[cfg(feature = "core-local")]
+            self.inner.notify_local_waiters();
         }
     }
 
@@ -716,6 +759,13 @@ impl<M: Manager, W: From<Object<M>>> LocalPool<M, W> {
     pub fn status(&self) -> Status {
         self.pool.status()
     }
+
+    /// Returns how often this local handle had to wait for local availability.
+    #[must_use]
+    #[doc(hidden)]
+    pub fn local_wait_count(&self) -> usize {
+        self.local.as_ref().map_or(0, |local| local.waits())
+    }
 }
 
 impl<M: Manager> PoolInner<M> {
@@ -845,8 +895,16 @@ impl<M: Manager> PoolInner<M> {
         drop(slots);
         if add_permit {
             self.storage.semaphore().add_permits(1);
+            self.notify_local_waiters();
         }
         self.manager.detach(&mut inner.obj);
+    }
+
+    #[cfg(feature = "core-local")]
+    fn notify_local_waiters(&self) {
+        for local in self.storage.local_storages() {
+            local.notify_waiters();
+        }
     }
 }
 

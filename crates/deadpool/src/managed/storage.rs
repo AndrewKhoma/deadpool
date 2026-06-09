@@ -11,6 +11,8 @@ use std::sync::{
 
 #[cfg(feature = "core-local")]
 use crossbeam_queue::SegQueue;
+#[cfg(feature = "core-local")]
+use tokio::sync::Notify;
 use tokio::sync::Semaphore;
 
 use crate::PoolMode;
@@ -171,6 +173,8 @@ pub(crate) struct Slots<T> {
 pub(crate) struct LocalStorage<T> {
     queue: SegQueue<T>,
     available: AtomicUsize,
+    waits: AtomicUsize,
+    notify: Notify,
 }
 
 #[cfg(feature = "core-local")]
@@ -179,6 +183,8 @@ impl<T> Default for LocalStorage<T> {
         Self {
             queue: SegQueue::new(),
             available: AtomicUsize::new(0),
+            waits: AtomicUsize::new(0),
+            notify: Notify::new(),
         }
     }
 }
@@ -188,12 +194,26 @@ impl<T> LocalStorage<T> {
     pub(crate) fn push(&self, value: T) {
         self.queue.push(value);
         let _ = self.available.fetch_add(1, Ordering::Relaxed);
+        self.notify.notify_one();
     }
 
     pub(crate) fn pop(&self) -> Option<T> {
         let value = self.queue.pop()?;
         let _ = self.available.fetch_sub(1, Ordering::Relaxed);
         Some(value)
+    }
+
+    pub(crate) async fn notified(&self) {
+        let _ = self.waits.fetch_add(1, Ordering::Relaxed);
+        self.notify.notified().await;
+    }
+
+    pub(crate) fn notify_waiters(&self) {
+        self.notify.notify_waiters();
+    }
+
+    pub(crate) fn waits(&self) -> usize {
+        self.waits.load(Ordering::Relaxed)
     }
 
     pub(crate) fn drain(&self) -> Vec<T> {

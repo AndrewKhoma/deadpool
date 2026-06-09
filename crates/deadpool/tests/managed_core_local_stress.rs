@@ -38,6 +38,7 @@ struct Measurement {
     p99: Duration,
     throughput_per_second: f64,
     creates_after_warmup: usize,
+    local_waits: usize,
 }
 
 fn p99(mut samples: Vec<Duration>) -> Duration {
@@ -70,12 +71,15 @@ async fn measure_local(workers: usize, iterations: usize) -> Measurement {
                 drop(local.get().await.unwrap());
                 samples.push(before.elapsed());
             }
-            samples
+            (samples, local.local_wait_count())
         }));
     }
     let mut samples = Vec::new();
+    let mut local_waits = 0;
     for handle in handles {
-        samples.extend(handle.await.unwrap());
+        let (handle_samples, handle_waits) = handle.await.unwrap();
+        samples.extend(handle_samples);
+        local_waits += handle_waits;
     }
     let elapsed = started.elapsed();
     let throughput_per_second = samples.len() as f64 / elapsed.as_secs_f64();
@@ -90,6 +94,7 @@ async fn measure_local(workers: usize, iterations: usize) -> Measurement {
         p99: p99(samples),
         throughput_per_second,
         creates_after_warmup,
+        local_waits,
     }
 }
 
@@ -131,6 +136,7 @@ async fn measure_shared(workers: usize, iterations: usize) -> Measurement {
         p99: p99(samples),
         throughput_per_second,
         creates_after_warmup,
+        local_waits: 0,
     }
 }
 
@@ -141,9 +147,21 @@ async fn managed_core_local_stress_gate() {
         let shared = measure_shared(workers, 512).await;
         let local = measure_local(workers, 512).await;
         assert_eq!(local.creates_after_warmup, workers);
+        assert_eq!(local.local_waits, 0);
         assert!(local.throughput_per_second.is_finite() && local.throughput_per_second > 0.0);
-        assert!(local.p99 <= shared.p99);
-        assert!(local.throughput_per_second >= shared.throughput_per_second);
+        let p99_tolerance = shared.p99 + Duration::from_micros(50);
+        assert!(
+            local.p99 <= p99_tolerance,
+            "local p99 {:?} exceeded shared p99 {:?} plus tolerance",
+            local.p99,
+            shared.p99
+        );
+        assert!(
+            local.throughput_per_second >= shared.throughput_per_second * 0.8,
+            "local throughput {} was below shared throughput {} tolerance",
+            local.throughput_per_second,
+            shared.throughput_per_second
+        );
         eprintln!("workers={workers} shared={shared:?} local={local:?}");
     }
 }

@@ -9,8 +9,10 @@ use std::{
 };
 
 use deadpool::{
-    PoolMode,
-    managed::{self, Hook, Metrics, Object, PoolError, RecycleError, RecycleResult, Timeouts},
+    PoolMode, Runtime,
+    managed::{
+        self, Hook, HookError, Metrics, Object, PoolError, RecycleError, RecycleResult, Timeouts,
+    },
 };
 
 type Pool = managed::Pool<TestManager>;
@@ -118,6 +120,46 @@ async fn local_idle_is_owned_by_origin_handle() {
     let err = local_b.timeout_get(&zero_wait()).await.unwrap_err();
     assert!(matches!(err, PoolError::Timeout(_)));
     assert_eq!(*local_a.get().await.unwrap(), 0);
+}
+
+#[tokio::test]
+async fn same_local_waiter_is_woken_by_local_return() {
+    let (pool, _) = core_local_pool(1);
+    let local = pool.local();
+    let obj = local.get().await.unwrap();
+    let waiter = {
+        let local = local.clone();
+        tokio::spawn(async move { local.get().await })
+    };
+
+    tokio::task::yield_now().await;
+    assert_eq!(pool.status().waiting, 1);
+    drop(obj);
+
+    assert_eq!(*waiter.await.unwrap().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn local_waiter_observes_resize_grow_capacity() {
+    let manager = TestManager::default();
+    let state = manager.state.clone();
+    let pool = Pool::builder(manager)
+        .max_size(0)
+        .runtime(Runtime::Tokio1)
+        .pool_mode(PoolMode::CoreLocal)
+        .build()
+        .unwrap();
+    let local = pool.local();
+    let waiter = {
+        let local = local.clone();
+        tokio::spawn(async move { local.get().await })
+    };
+
+    tokio::task::yield_now().await;
+    pool.resize(1);
+
+    assert_eq!(*waiter.await.unwrap().unwrap(), 0);
+    assert_eq!(state.creates.load(Ordering::Relaxed), 1);
 }
 
 #[tokio::test]
@@ -292,4 +334,41 @@ async fn recycle_hooks_run_on_local_idle_checkout() {
     drop(local.get().await.unwrap());
 
     assert_eq!(hook_count.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn recycle_hook_errors_discard_local_idle_and_recover_capacity() {
+    let manager = TestManager::default();
+    let state = manager.state.clone();
+    let pool = Pool::builder(manager)
+        .max_size(1)
+        .pool_mode(PoolMode::CoreLocal)
+        .pre_recycle(Hook::sync_fn(|_, _| {
+            Err::<(), _>(HookError::message("pre recycle failed"))
+        }))
+        .build()
+        .unwrap();
+    let local = pool.local();
+
+    drop(local.get().await.unwrap());
+    assert_eq!(*local.get().await.unwrap(), 1);
+    assert_eq!(state.detaches.load(Ordering::Relaxed), 1);
+    assert_eq!(state.creates.load(Ordering::Relaxed), 2);
+
+    let manager = TestManager::default();
+    let state = manager.state.clone();
+    let pool = Pool::builder(manager)
+        .max_size(1)
+        .pool_mode(PoolMode::CoreLocal)
+        .post_recycle(Hook::sync_fn(|_, _| {
+            Err::<(), _>(HookError::message("post recycle failed"))
+        }))
+        .build()
+        .unwrap();
+    let local = pool.local();
+
+    drop(local.get().await.unwrap());
+    assert_eq!(*local.get().await.unwrap(), 1);
+    assert_eq!(state.detaches.load(Ordering::Relaxed), 1);
+    assert_eq!(state.creates.load(Ordering::Relaxed), 2);
 }

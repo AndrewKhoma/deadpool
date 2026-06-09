@@ -166,9 +166,21 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
                 QueueMode::Lifo => self.inner.storage.slots().vec.pop_back(),
             };
             let inner_obj = if let Some(inner_obj) = inner_obj {
-                self.try_recycle(timeouts, inner_obj).await?
+                match self.try_recycle(timeouts, inner_obj).await {
+                    Ok(inner_obj) => inner_obj,
+                    Err(err) => {
+                        self.inner.notify_local_waiters();
+                        return Err(err);
+                    }
+                }
             } else {
-                self.try_create(timeouts).await?
+                match self.try_create(timeouts).await {
+                    Ok(inner_obj) => inner_obj,
+                    Err(err) => {
+                        self.inner.notify_local_waiters();
+                        return Err(err);
+                    }
+                }
             };
             if let Some(inner_obj) = inner_obj {
                 break inner_obj;
@@ -870,6 +882,7 @@ impl<M: Manager> PoolInner<M> {
     #[cfg(feature = "core-local")]
     fn drain_local_objects(&self) {
         for local in self.storage.local_storages() {
+            local.close();
             self.drain_local_storage(&local);
         }
     }

@@ -38,6 +38,7 @@ struct Measurement {
     p99: Duration,
     throughput_per_second: f64,
     creates_after_warmup: usize,
+    creates_during_measurement: usize,
     local_waits: usize,
 }
 
@@ -84,9 +85,9 @@ async fn measure_local(workers: usize, iterations: usize) -> Measurement {
     let elapsed = started.elapsed();
     let throughput_per_second = samples.len() as f64 / elapsed.as_secs_f64();
 
+    let creates_during_measurement = creates.load(Ordering::Relaxed) - creates_after_warmup;
     assert_eq!(
-        creates.load(Ordering::Relaxed),
-        creates_after_warmup,
+        creates_during_measurement, 0,
         "same-handle local hot path created additional objects"
     );
 
@@ -94,6 +95,7 @@ async fn measure_local(workers: usize, iterations: usize) -> Measurement {
         p99: p99(samples),
         throughput_per_second,
         creates_after_warmup,
+        creates_during_measurement,
         local_waits,
     }
 }
@@ -137,6 +139,7 @@ async fn measure_shared(workers: usize, iterations: usize) -> Measurement {
         p99: p99(samples),
         throughput_per_second,
         creates_after_warmup,
+        creates_during_measurement: creates.load(Ordering::Relaxed) - creates_after_warmup,
         local_waits: 0,
     }
 }
@@ -184,6 +187,7 @@ async fn managed_core_local_stress_gate() {
         let shared = measure_shared(workers, 512).await;
         let local = measure_local(workers, 512).await;
         assert_eq!(local.creates_after_warmup, workers);
+        assert_eq!(local.creates_during_measurement, 0);
         assert_eq!(local.local_waits, 0);
         assert!(local.throughput_per_second.is_finite() && local.throughput_per_second > 0.0);
         let p99_tolerance = shared.p99 + Duration::from_micros(50);

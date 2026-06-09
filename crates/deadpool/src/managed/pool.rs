@@ -16,10 +16,10 @@ use deadpool_runtime::{Runtime, timeout};
 use tokio::sync::{Semaphore, TryAcquireError};
 
 use crate::{
-    Status,
+    PoolMode, Status,
     managed::{
         Manager, Metrics, Object, PoolBuilder, PoolConfig, PoolError, QueueMode, TimeoutType,
-        Timeouts, dropguard::DropGuard, hooks::Hooks, object::ObjectInner,
+        Timeouts, dropguard::DropGuard, hooks::Hooks, object::ObjectInner, storage::StorageMode,
     },
 };
 
@@ -79,9 +79,28 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
                 config: builder.config,
                 hooks: builder.hooks,
                 runtime: builder.runtime,
+                storage_mode: builder.mode.into(),
             }),
             _wrapper: PhantomData,
         }
+    }
+
+    /// Returns the configured [`PoolMode`].
+    #[must_use]
+    pub fn pool_mode(&self) -> PoolMode {
+        self.inner.storage_mode.pool_mode()
+    }
+
+    /// Creates a local handle for this pool.
+    ///
+    /// In [`PoolMode::Shared`], the handle delegates to the shared pool. In
+    /// [`PoolMode::CoreLocal`], later phases attach core-local storage to this
+    /// handle while preserving the same public API surface.
+    #[cfg(feature = "core-local")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "core-local")))]
+    #[must_use]
+    pub fn local(&self) -> LocalPool<M, W> {
+        LocalPool { pool: self.clone() }
     }
 
     /// Retrieves an [`Object`] from this [`Pool`] or waits for one to
@@ -423,6 +442,7 @@ pub(crate) struct PoolInner<M: Manager> {
     config: PoolConfig,
     runtime: Option<Runtime>,
     hooks: Hooks<M>,
+    storage_mode: StorageMode,
 }
 
 #[derive(Debug)]
@@ -447,7 +467,85 @@ where
             .field("config", &self.config)
             .field("runtime", &self.runtime)
             .field("hooks", &self.hooks)
+            .field("storage_mode", &self.storage_mode)
             .finish()
+    }
+}
+
+/// Local handle for a managed [`Pool`].
+///
+/// Local handles are the opt-in API surface for core-local storage. Phase 1
+/// keeps this handle delegating to the existing shared storage; later phases
+/// attach local idle ownership behind the same type.
+#[cfg(feature = "core-local")]
+#[cfg_attr(docsrs, doc(cfg(feature = "core-local")))]
+pub struct LocalPool<M: Manager, W: From<Object<M>> = Object<M>> {
+    pool: Pool<M, W>,
+}
+
+#[cfg(feature = "core-local")]
+impl<M: Manager, W: From<Object<M>>> Clone for LocalPool<M, W> {
+    fn clone(&self) -> Self {
+        Self {
+            pool: self.pool.clone(),
+        }
+    }
+}
+
+#[cfg(feature = "core-local")]
+impl<M, W> fmt::Debug for LocalPool<M, W>
+where
+    M: fmt::Debug + Manager,
+    M::Type: fmt::Debug,
+    W: From<Object<M>>,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalPool")
+            .field("pool", &self.pool)
+            .finish()
+    }
+}
+
+#[cfg(feature = "core-local")]
+impl<M: Manager, W: From<Object<M>>> LocalPool<M, W> {
+    /// Returns the shared pool backing this local handle.
+    #[must_use]
+    pub fn pool(&self) -> &Pool<M, W> {
+        &self.pool
+    }
+
+    /// Returns the configured [`PoolMode`].
+    #[must_use]
+    pub fn pool_mode(&self) -> PoolMode {
+        self.pool.pool_mode()
+    }
+
+    /// Retrieves an [`Object`] from this local handle.
+    ///
+    /// Phase 1 delegates to [`Pool::get`].
+    ///
+    /// # Errors
+    ///
+    /// See [`PoolError`] for details.
+    pub async fn get(&self) -> Result<W, PoolError<M::Error>> {
+        self.pool.get().await
+    }
+
+    /// Retrieves an [`Object`] from this local handle using custom timeouts.
+    ///
+    /// Phase 1 delegates to [`Pool::timeout_get`].
+    ///
+    /// # Errors
+    ///
+    /// See [`PoolError`] for details.
+    pub async fn timeout_get(&self, timeouts: &Timeouts) -> Result<W, PoolError<M::Error>> {
+        self.pool.timeout_get(timeouts).await
+    }
+
+    /// Retrieves [`Status`] of the backing pool.
+    #[must_use]
+    pub fn status(&self) -> Status {
+        self.pool.status()
     }
 }
 

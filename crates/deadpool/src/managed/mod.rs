@@ -58,8 +58,9 @@ mod metrics;
 mod object;
 mod pool;
 pub mod reexports;
+mod storage;
 
-pub use crate::Status;
+pub use crate::{PoolMode, Status};
 
 pub use self::{
     builder::{BuildError, PoolBuilder},
@@ -71,3 +72,7 @@ pub use self::{
     object::{Object, ObjectId},
     pool::{Pool, RetainResult, WeakPool},
 };
+
+#[cfg(feature = "core-local")]
+#[cfg_attr(docsrs, doc(cfg(feature = "core-local")))]
+pub use self::pool::LocalPool;

@@ -29,6 +29,13 @@ pub mod managed;
 #[cfg_attr(docsrs, doc(cfg(feature = "unmanaged")))]
 pub mod unmanaged;
 
+#[cfg(any(feature = "managed", feature = "unmanaged"))]
+mod mode;
+
+#[cfg(any(feature = "managed", feature = "unmanaged"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "managed", feature = "unmanaged"))))]
+pub use self::mode::PoolMode;
+
 pub use deadpool_runtime::Runtime;
 
 /// The current pool status.

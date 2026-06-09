@@ -1,6 +1,6 @@
 use std::{fmt, marker::PhantomData, time::Duration};
 
-use crate::Runtime;
+use crate::{PoolMode, Runtime};
 
 use super::{
     Manager, Object, Pool, PoolConfig, QueueMode, Timeouts,
@@ -47,6 +47,7 @@ where
     pub(crate) config: PoolConfig,
     pub(crate) runtime: Option<Runtime>,
     pub(crate) hooks: Hooks<M>,
+    pub(crate) mode: PoolMode,
     _wrapper: PhantomData<fn() -> W>,
 }
 
@@ -62,6 +63,7 @@ where
             .field("config", &self.config)
             .field("runtime", &self.runtime)
             .field("hooks", &self.hooks)
+            .field("mode", &self.mode)
             .field("_wrapper", &self._wrapper)
             .finish()
     }
@@ -78,6 +80,7 @@ where
             config: PoolConfig::default(),
             runtime: None,
             hooks: Hooks::default(),
+            mode: PoolMode::Shared,
             _wrapper: PhantomData,
         }
     }
@@ -136,6 +139,20 @@ where
     /// Sets the [`PoolConfig::queue_mode`].
     pub fn queue_mode(mut self, value: QueueMode) -> Self {
         self.config.queue_mode = value;
+        self
+    }
+
+    /// Sets the [`PoolMode`] to build the [`Pool`] with.
+    pub fn pool_mode(mut self, value: PoolMode) -> Self {
+        self.mode = value;
+        self
+    }
+
+    /// Selects [`PoolMode::CoreLocal`].
+    #[cfg(feature = "core-local")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "core-local")))]
+    pub fn core_local(mut self) -> Self {
+        self.mode = PoolMode::CoreLocal;
         self
     }
 

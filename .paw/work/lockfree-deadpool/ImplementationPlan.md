@@ -39,7 +39,7 @@ Verification will combine existing crate tests, new managed/unmanaged core-local
 
 ## Phase Status
 
-- [ ] **Phase 1: Opt-In API and Storage Abstraction** - Add feature-gated core-local mode surfaces and internal storage boundaries without changing default behavior.
+- [x] **Phase 1: Opt-In API and Storage Abstraction** - Add feature-gated core-local mode surfaces and internal storage boundaries without changing default behavior.
 - [ ] **Phase 2: Managed Core-Local Pool Mode** - Implement managed-pool core-local storage integration and managed behavior coverage.
 - [ ] **Phase 3: Unmanaged Core-Local Pool Mode** - Implement unmanaged-pool core-local storage integration and unmanaged behavior coverage.
 - [ ] **Phase 4: PostgreSQL Compatibility and Stress Validation** - Validate reexported PostgreSQL usage, gateway-style expectations, feature combinations, and performance/stress entry points.
@@ -69,21 +69,21 @@ Verification will combine existing crate tests, new managed/unmanaged core-local
 
 #### Automated Verification:
 
-- [ ] Core feature checks pass: `cd crates/deadpool && cargo check --no-default-features --features managed,rt_tokio_1`
-- [ ] Core feature checks pass: `cd crates/deadpool && cargo check --no-default-features --features unmanaged,rt_tokio_1`
-- [ ] Core-local managed feature check passes: `cd crates/deadpool && cargo check --no-default-features --features managed,core-local,rt_tokio_1`
-- [ ] Core-local unmanaged feature check passes: `cd crates/deadpool && cargo check --no-default-features --features unmanaged,core-local,rt_tokio_1`
-- [ ] PostgreSQL forwarding feature check passes: `cd crates/deadpool-postgres && cargo check --no-default-features --features core-local,rt_tokio_1`
-- [ ] Core all-feature checks pass: `cd crates/deadpool && cargo check --all-features`
-- [ ] Core tests pass for touched API surfaces: `cd crates/deadpool && cargo test --all-features`
-- [ ] Formatting passes: `cd crates/deadpool && cargo fmt --check`
+- [x] Core feature checks pass: `cd crates/deadpool && cargo check --no-default-features --features managed,rt_tokio_1`
+- [x] Core feature checks pass: `cd crates/deadpool && cargo check --no-default-features --features unmanaged,rt_tokio_1`
+- [x] Core-local managed feature check passes: `cd crates/deadpool && cargo check --no-default-features --features managed,core-local,rt_tokio_1`
+- [x] Core-local unmanaged feature check passes: `cd crates/deadpool && cargo check --no-default-features --features unmanaged,core-local,rt_tokio_1`
+- [x] PostgreSQL forwarding feature check passes: `cd crates/deadpool-postgres && cargo check --no-default-features --features core-local,rt_tokio_1`
+- [x] Core all-feature checks pass: `cd crates/deadpool && cargo check --all-features`
+- [x] Core tests pass for touched API surfaces: `cd crates/deadpool && cargo test --all-features`
+- [x] Formatting passes: `cd crates/deadpool && cargo fmt --check`
 
 #### Manual Verification:
 
-- [ ] Existing examples of managed and unmanaged pool creation still compile without selecting the new mode.
-- [ ] Opt-in mode selection is explicit and does not require modifying `PoolConfig` struct literals.
-- [ ] Mode documentation names which behavior is default and which behavior is core-local.
-- [ ] Explicit local-handle behavior, same-handle hot-path guarantee, and migrated/cross-handle reclamation behavior are named before managed/unmanaged implementation begins.
+- [x] Existing examples of managed and unmanaged pool creation still compile without selecting the new mode.
+- [x] Opt-in mode selection is explicit and does not require modifying `PoolConfig` struct literals.
+- [x] Mode documentation names which behavior is default and which behavior is core-local.
+- [x] Explicit local-handle behavior, same-handle hot-path guarantee, and migrated/cross-handle reclamation behavior are named before managed/unmanaged implementation begins.
 
 ---
 

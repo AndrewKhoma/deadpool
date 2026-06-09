@@ -54,6 +54,9 @@ macro_rules! managed_reexports {
         #[doc=concat!("Type alias for using [`deadpool::managed::HookError`] with [`", $crate_name, "`].")]
         pub type HookError = deadpool::managed::HookError<$Error>;
 
+        #[doc=concat!("Type alias for using [`deadpool::PoolMode`] with [`", $crate_name, "`].")]
+        pub type PoolMode = deadpool::PoolMode;
+
         #[doc=concat!("Type alias for using [`deadpool::managed::QueueMode`] with [`", $crate_name, "`].")]
         pub type QueueMode = deadpool::managed::QueueMode;
     };

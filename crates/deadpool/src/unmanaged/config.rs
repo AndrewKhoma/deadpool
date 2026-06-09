@@ -3,6 +3,9 @@ use std::time::Duration;
 use crate::Runtime;
 
 /// Pool configuration.
+///
+/// Storage mode selection is configured through [`Pool`] constructors rather
+/// than stored in this public field-based config type.
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct PoolConfig {

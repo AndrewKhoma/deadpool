@@ -30,6 +30,7 @@
 
 mod config;
 mod errors;
+mod storage;
 
 use std::{
     convert::TryInto,
@@ -44,7 +45,7 @@ use std::{
 use deadpool_runtime::timeout;
 use tokio::sync::{Semaphore, TryAcquireError};
 
-pub use crate::Status;
+pub use crate::{PoolMode, Status};
 
 pub use self::{config::PoolConfig, errors::PoolError};
 
@@ -156,9 +157,22 @@ impl<T> Pool<T> {
         Self::from_config(&PoolConfig::new(max_size))
     }
 
+    /// Creates a new empty [`Pool`] with the given `max_size` and [`PoolMode`].
+    #[must_use]
+    pub fn new_with_mode(max_size: usize, mode: PoolMode) -> Self {
+        Self::from_config_with_mode(&PoolConfig::new(max_size), mode)
+    }
+
     /// Create a new empty [`Pool`] using the given [`PoolConfig`].
     #[must_use]
     pub fn from_config(config: &PoolConfig) -> Self {
+        Self::from_config_with_mode(config, PoolMode::Shared)
+    }
+
+    /// Create a new empty [`Pool`] using the given [`PoolConfig`] and
+    /// [`PoolMode`].
+    #[must_use]
+    pub fn from_config_with_mode(config: &PoolConfig, mode: PoolMode) -> Self {
         Self {
             inner: Arc::new(PoolInner {
                 config: *config,
@@ -167,8 +181,27 @@ impl<T> Pool<T> {
                 size_semaphore: Semaphore::new(config.max_size),
                 available: AtomicIsize::new(0),
                 semaphore: Semaphore::new(0),
+                storage_mode: mode.into(),
             }),
         }
+    }
+
+    /// Creates a local handle for this pool.
+    ///
+    /// In [`PoolMode::Shared`], the handle delegates to the shared pool. In
+    /// [`PoolMode::CoreLocal`], later phases attach core-local storage to this
+    /// handle while preserving the same public API surface.
+    #[cfg(feature = "core-local")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "core-local")))]
+    #[must_use]
+    pub fn local(&self) -> LocalPool<T> {
+        LocalPool { pool: self.clone() }
+    }
+
+    /// Returns the configured [`PoolMode`].
+    #[must_use]
+    pub fn pool_mode(&self) -> PoolMode {
+        self.inner.storage_mode.pool_mode()
     }
 
     /// Retrieves an [`Object`] from this [`Pool`] or waits for the one to
@@ -369,6 +402,7 @@ struct PoolInner<T> {
     /// [`Future`]: std::future::Future
     available: AtomicIsize,
     semaphore: Semaphore,
+    storage_mode: storage::StorageMode,
 }
 
 impl<T> PoolInner<T> {
@@ -410,6 +444,19 @@ where
     /// Creates a new [`Pool`] from the given [`ExactSizeIterator`] of
     /// [`Object`]s.
     fn from(iter: I) -> Self {
+        Self::from_iter_with_mode(iter, PoolMode::Shared)
+    }
+}
+
+impl<T> Pool<T> {
+    /// Creates a new [`Pool`] from the given [`ExactSizeIterator`] of
+    /// objects using the given [`PoolMode`].
+    #[must_use]
+    pub fn from_iter_with_mode<I>(iter: I, mode: PoolMode) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        <I as IntoIterator>::IntoIter: ExactSizeIterator,
+    {
         let queue = iter.into_iter().collect::<Vec<_>>();
         let len = queue.len();
         Self {
@@ -420,7 +467,130 @@ where
                 size_semaphore: Semaphore::new(0),
                 available: AtomicIsize::new(len.try_into().unwrap()),
                 semaphore: Semaphore::new(len),
+                storage_mode: mode.into(),
             }),
         }
+    }
+}
+
+/// Local handle for an unmanaged [`Pool`].
+///
+/// Local handles are the opt-in API surface for core-local storage. Phase 1
+/// keeps this handle delegating to the existing shared storage; later phases
+/// attach local idle ownership behind the same type.
+#[cfg(feature = "core-local")]
+#[cfg_attr(docsrs, doc(cfg(feature = "core-local")))]
+#[derive(Clone, Debug)]
+pub struct LocalPool<T> {
+    pool: Pool<T>,
+}
+
+#[cfg(feature = "core-local")]
+impl<T> LocalPool<T> {
+    /// Returns the shared pool backing this local handle.
+    #[must_use]
+    pub fn pool(&self) -> &Pool<T> {
+        &self.pool
+    }
+
+    /// Returns the configured [`PoolMode`].
+    #[must_use]
+    pub fn pool_mode(&self) -> PoolMode {
+        self.pool.pool_mode()
+    }
+
+    /// Retrieves an [`Object`] from this local handle.
+    ///
+    /// Phase 1 delegates to [`Pool::get`].
+    ///
+    /// # Errors
+    ///
+    /// See [`PoolError`] for details.
+    pub async fn get(&self) -> Result<Object<T>, PoolError> {
+        self.pool.get().await
+    }
+
+    /// Retrieves an [`Object`] from this local handle without waiting.
+    ///
+    /// Phase 1 delegates to [`Pool::try_get`].
+    ///
+    /// # Errors
+    ///
+    /// See [`PoolError`] for details.
+    pub fn try_get(&self) -> Result<Object<T>, PoolError> {
+        self.pool.try_get()
+    }
+
+    /// Retrieves an [`Object`] from this local handle using a custom timeout.
+    ///
+    /// Phase 1 delegates to [`Pool::timeout_get`].
+    ///
+    /// # Errors
+    ///
+    /// See [`PoolError`] for details.
+    pub async fn timeout_get(&self, duration: Option<Duration>) -> Result<Object<T>, PoolError> {
+        self.pool.timeout_get(duration).await
+    }
+
+    /// Adds an object through this local handle.
+    ///
+    /// # Errors
+    ///
+    /// See [`PoolError`] for details.
+    pub async fn add(&self, object: T) -> Result<(), (T, PoolError)> {
+        self.pool.add(object).await
+    }
+
+    /// Tries to add an object through this local handle.
+    ///
+    /// # Errors
+    ///
+    /// See [`PoolError`] for details.
+    pub fn try_add(&self, object: T) -> Result<(), (T, PoolError)> {
+        self.pool.try_add(object)
+    }
+
+    /// Removes an [`Object`] through this local handle.
+    ///
+    /// # Errors
+    ///
+    /// See [`PoolError`] for details.
+    pub async fn remove(&self) -> Result<T, PoolError> {
+        self.pool.remove().await
+    }
+
+    /// Tries to remove an [`Object`] through this local handle.
+    ///
+    /// # Errors
+    ///
+    /// See [`PoolError`] for details.
+    pub fn try_remove(&self) -> Result<T, PoolError> {
+        self.pool.try_remove()
+    }
+
+    /// Removes an [`Object`] through this local handle using a custom timeout.
+    ///
+    /// # Errors
+    ///
+    /// See [`PoolError`] for details.
+    pub async fn timeout_remove(&self, timeout: Option<Duration>) -> Result<T, PoolError> {
+        self.pool.timeout_remove(timeout).await
+    }
+
+    /// Closes the backing [`Pool`].
+    pub fn close(&self) {
+        self.pool.close();
+    }
+
+    /// Indicates whether the backing [`Pool`] has been closed.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.pool.is_closed()
+    }
+
+    /// Retrieves [`Status`] of the backing pool.
+    #[must_use]
+    pub fn status(&self) -> Status {
+        self.pool.status()
     }
 }

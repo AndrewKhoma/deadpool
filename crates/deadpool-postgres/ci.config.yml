@@ -3,6 +3,7 @@ backend: tokio-postgres
 features:
   own:
     - serde
+    - core-local
     - rt_tokio_1
     - rt_async-std_1
 

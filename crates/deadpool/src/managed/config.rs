@@ -4,7 +4,11 @@ use super::BuildError;
 
 /// [`Pool`] configuration.
 ///
+/// Storage mode selection is configured through [`PoolBuilder`] methods rather
+/// than stored in this public field-based config type.
+///
 /// [`Pool`]: super::Pool
+/// [`PoolBuilder`]: super::PoolBuilder
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct PoolConfig {

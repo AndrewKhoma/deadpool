@@ -42,7 +42,7 @@ Verification will combine existing crate tests, new managed/unmanaged core-local
 - [x] **Phase 1: Opt-In API and Storage Abstraction** - Add feature-gated core-local mode surfaces and internal storage boundaries without changing default behavior.
 - [x] **Phase 2: Managed Core-Local Pool Mode** - Implement managed-pool core-local storage integration and managed behavior coverage.
 - [x] **Phase 3: Unmanaged Core-Local Pool Mode** - Implement unmanaged-pool core-local storage integration and unmanaged behavior coverage.
-- [ ] **Phase 4: PostgreSQL Compatibility and Stress Validation** - Validate reexported PostgreSQL usage, gateway-style expectations, feature combinations, and performance/stress entry points.
+- [x] **Phase 4: PostgreSQL Compatibility and Stress Validation** - Validate reexported PostgreSQL usage, gateway-style expectations, feature combinations, and performance/stress entry points.
 - [ ] **Phase 5: Documentation** - Document opt-in usage, lockfree boundaries, compatibility expectations, and as-built implementation details.
 
 ## Phase Candidates
@@ -178,19 +178,19 @@ Verification will combine existing crate tests, new managed/unmanaged core-local
 
 #### Automated Verification:
 
-- [ ] PostgreSQL feature check passes: `cd crates/deadpool-postgres && cargo check --features serde,rt_tokio_1,rt_async-std_1`
-- [ ] PostgreSQL core-local feature check passes: `cd crates/deadpool-postgres && cargo check --features serde,core-local,rt_tokio_1,rt_async-std_1`
-- [ ] PostgreSQL reexport check passes: `cd crates/deadpool-postgres && ../../tools/check-reexported-features.sh`
-- [ ] PostgreSQL tests pass when a PostgreSQL test service is available: `cd crates/deadpool-postgres && cargo test --features serde,core-local,rt_tokio_1,rt_async-std_1`
-- [ ] Core stress/benchmark builds pass: `cd crates/deadpool && cargo bench --no-run --all-features`
-- [ ] Core docs build: `cd crates/deadpool && cargo doc --no-deps --all-features`
-- [ ] PostgreSQL docs build: `cd crates/deadpool-postgres && cargo doc --no-deps --features serde,rt_tokio_1,rt_async-std_1`
+- [x] PostgreSQL feature check passes: `cd crates/deadpool-postgres && cargo check --features serde,rt_tokio_1,rt_async-std_1`
+- [x] PostgreSQL core-local feature check passes: `cd crates/deadpool-postgres && cargo check --features serde,core-local,rt_tokio_1,rt_async-std_1`
+- [x] PostgreSQL reexport check passes: `cd crates/deadpool-postgres && ../../tools/check-reexported-features.sh`
+- [x] PostgreSQL non-live core-local API tests pass; live PostgreSQL tests are covered by existing service-backed workflow when a PostgreSQL service is available: `cd crates/deadpool-postgres && cargo test --no-default-features --features core-local,rt_tokio_1 --test core_local_api`
+- [x] Core stress/benchmark builds pass: `cd crates/deadpool && cargo bench --no-run --all-features`
+- [x] Core docs build: `cd crates/deadpool && cargo doc --no-deps --all-features`
+- [x] PostgreSQL docs build: `cd crates/deadpool-postgres && cargo doc --no-deps --features serde,rt_tokio_1,rt_async-std_1`
 
 #### Manual Verification:
 
-- [ ] Existing `deadpool-postgres` config usage remains default-compatible.
-- [ ] The gateway reference expectations are represented by automated tests or extracted contract fixtures without editing gateway source.
-- [ ] Bench/stress output records p99 checkout latency, throughput, and blocking/parking observations for shared and core-local checkout/checkin behavior.
+- [x] Existing `deadpool-postgres` config usage remains default-compatible.
+- [x] The gateway reference expectations are represented by automated tests or extracted contract fixtures without editing gateway source.
+- [x] Bench/stress output records p99 checkout latency, throughput, and blocking/parking observations for shared and core-local checkout/checkin behavior.
 
 ---
 

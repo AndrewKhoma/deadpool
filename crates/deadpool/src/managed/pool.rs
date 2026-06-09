@@ -169,6 +169,7 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
                 match self.try_recycle(timeouts, inner_obj).await {
                     Ok(inner_obj) => inner_obj,
                     Err(err) => {
+                        drop(permit);
                         self.inner.notify_local_waiters();
                         return Err(err);
                     }
@@ -177,6 +178,7 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
                 match self.try_create(timeouts).await {
                     Ok(inner_obj) => inner_obj,
                     Err(err) => {
+                        drop(permit);
                         self.inner.notify_local_waiters();
                         return Err(err);
                     }
@@ -336,6 +338,7 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
                 match self.try_recycle(timeouts, inner_obj).await {
                     Ok(inner_obj) => inner_obj,
                     Err(err) => {
+                        drop(permit);
                         self.inner.notify_local_waiters();
                         return Err(err);
                     }
@@ -344,6 +347,7 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
                 match self.try_create(timeouts).await {
                     Ok(inner_obj) => inner_obj,
                     Err(err) => {
+                        drop(permit);
                         self.inner.notify_local_waiters();
                         return Err(err);
                     }

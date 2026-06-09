@@ -357,6 +357,24 @@ async fn local_create_failure_recovers_waiter_accounting() {
 }
 
 #[tokio::test]
+async fn concurrent_local_create_failure_wakes_other_waiters() {
+    let (pool, state) = core_local_pool(1);
+    let local = pool.local();
+    state.fail_create.store(true, Ordering::Relaxed);
+
+    let first = {
+        let local = local.clone();
+        tokio::spawn(async move { local.get().await })
+    };
+    tokio::task::yield_now().await;
+    let second = tokio::time::timeout(Duration::from_millis(100), local.get()).await;
+
+    assert!(first.await.unwrap().is_err());
+    assert!(second.unwrap().is_err());
+    assert_eq!(pool.status().size, 0);
+}
+
+#[tokio::test]
 async fn cancelled_local_waiter_does_not_change_capacity() {
     let (pool, _) = core_local_pool(0);
     let local = pool.local();

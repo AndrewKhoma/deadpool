@@ -3,7 +3,13 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
+#[cfg(feature = "core-local")]
+use std::sync::Weak;
+
 use crate::managed::{Manager, Metrics, Pool, WeakPool};
+
+#[cfg(feature = "core-local")]
+use super::storage::LocalStorage;
 
 /// Wrapper around the actual pooled object which implements [`Deref`],
 /// [`DerefMut`] and [`Drop`] traits.
@@ -17,6 +23,10 @@ pub struct Object<M: Manager> {
 
     /// Pool to return the pooled object to.
     pub(crate) pool: WeakPool<M>,
+
+    /// Local storage this object should return to.
+    #[cfg(feature = "core-local")]
+    pub(crate) local: Option<Weak<LocalStorage<ObjectInner<M>>>>,
 }
 
 impl<M> fmt::Debug for Object<M>
@@ -86,6 +96,15 @@ impl<M: Manager> Drop for Object<M> {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
             if let Some(pool) = self.pool.upgrade() {
+                #[cfg(feature = "core-local")]
+                if let Some(local) = self.local.as_ref() {
+                    if let Some(local) = local.upgrade() {
+                        pool.inner.return_object_to_local(&local, inner);
+                    } else {
+                        pool.inner.detach_object_inner(inner);
+                    }
+                    return;
+                }
                 pool.inner.return_object(inner)
             }
         }

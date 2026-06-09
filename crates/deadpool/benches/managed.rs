@@ -2,6 +2,8 @@ use std::{convert::TryInto, fmt::Display};
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
+#[cfg(feature = "core-local")]
+use deadpool::PoolMode;
 use deadpool::managed::Metrics;
 use tokio::task::JoinHandle;
 
@@ -81,6 +83,32 @@ async fn bench_get(cfg: Config) {
     }
 }
 
+#[cfg(feature = "core-local")]
+async fn bench_get_core_local(cfg: Config) {
+    let pool = Pool::builder(Manager {})
+        .max_size(cfg.pool_size)
+        .pool_mode(PoolMode::CoreLocal)
+        .build()
+        .unwrap();
+    let locals = (0..cfg.workers).map(|_| pool.local()).collect::<Vec<_>>();
+    for local in &locals {
+        let _ = local.get().await;
+    }
+    let join_handles: Vec<JoinHandle<()>> = locals
+        .into_iter()
+        .map(|local| {
+            tokio::spawn(async move {
+                for _ in 0..cfg.operations_per_worker() {
+                    let _ = local.get().await;
+                }
+            })
+        })
+        .collect();
+    for join_handle in join_handles {
+        join_handle.await.unwrap();
+    }
+}
+
 fn criterion_benchmark(c: &mut Criterion) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mut group = c.benchmark_group("managed");
@@ -91,6 +119,12 @@ fn criterion_benchmark(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("get", config), &config, |b, &cfg| {
             b.to_async(&runtime).iter(|| bench_get(cfg))
         });
+        #[cfg(feature = "core-local")]
+        group.bench_with_input(
+            BenchmarkId::new("get_core_local", config),
+            &config,
+            |b, &cfg| b.to_async(&runtime).iter(|| bench_get_core_local(cfg)),
+        );
     }
 }
 

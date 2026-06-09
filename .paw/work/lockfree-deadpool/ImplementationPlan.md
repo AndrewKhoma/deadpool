@@ -40,7 +40,7 @@ Verification will combine existing crate tests, new managed/unmanaged core-local
 ## Phase Status
 
 - [x] **Phase 1: Opt-In API and Storage Abstraction** - Add feature-gated core-local mode surfaces and internal storage boundaries without changing default behavior.
-- [ ] **Phase 2: Managed Core-Local Pool Mode** - Implement managed-pool core-local storage integration and managed behavior coverage.
+- [x] **Phase 2: Managed Core-Local Pool Mode** - Implement managed-pool core-local storage integration and managed behavior coverage.
 - [ ] **Phase 3: Unmanaged Core-Local Pool Mode** - Implement unmanaged-pool core-local storage integration and unmanaged behavior coverage.
 - [ ] **Phase 4: PostgreSQL Compatibility and Stress Validation** - Validate reexported PostgreSQL usage, gateway-style expectations, feature combinations, and performance/stress entry points.
 - [ ] **Phase 5: Documentation** - Document opt-in usage, lockfree boundaries, compatibility expectations, and as-built implementation details.
@@ -106,23 +106,23 @@ Verification will combine existing crate tests, new managed/unmanaged core-local
 
 #### Automated Verification:
 
-- [ ] Managed tests pass: `cd crates/deadpool && cargo test --all-features --test managed`
-- [ ] Managed timeout tests pass: `cd crates/deadpool && cargo test --all-features --test managed_timeout`
-- [ ] Managed cancellation tests pass: `cd crates/deadpool && cargo test --all-features --test managed_cancellation`
-- [ ] Core all-feature tests pass: `cd crates/deadpool && cargo test --all-features`
-- [ ] Managed benchmark builds: `cd crates/deadpool && cargo bench --bench managed --no-run --all-features`
-- [ ] Managed stress gate command passes: `cd crates/deadpool && cargo test --all-features --test managed_core_local_stress -- --ignored`
-- [ ] Managed stress gate passes with zero observed blocking/parking on the local hot path, p99 checkout latency no worse than shared mode, and throughput no worse than shared mode at 1/8/16/32 workers.
-- [ ] Clippy passes: `cd crates/deadpool && cargo clippy --no-deps --all-features -- -D warnings`
+- [x] Managed tests pass: `cd crates/deadpool && cargo test --all-features --test managed`
+- [x] Managed timeout tests pass: `cd crates/deadpool && cargo test --all-features --test managed_timeout`
+- [x] Managed cancellation tests pass: `cd crates/deadpool && cargo test --all-features --test managed_cancellation`
+- [x] Core all-feature tests pass: `cd crates/deadpool && cargo test --all-features`
+- [x] Managed benchmark builds: `cd crates/deadpool && cargo bench --bench managed --no-run --all-features`
+- [x] Managed stress gate command passes: `cd crates/deadpool && cargo test --all-features --test managed_core_local_stress -- --ignored`
+- [x] Managed stress gate passes with zero observed blocking/parking on the local hot path, p99 checkout latency no worse than shared mode, and throughput no worse than shared mode at 1/8/16/32 workers.
+- [x] Clippy passes: `cd crates/deadpool && cargo clippy --no-deps --all-features -- -D warnings`
 
 #### Manual Verification:
 
-- [ ] Core-local managed checkout/drop-return loops reuse objects without capacity loss.
-- [ ] Cross-local return/reclamation behavior is tested for two local handles sharing capacity, including return to origin handle and release/detach when the origin handle is inactive.
-- [ ] Managed `QueueMode::Fifo` and `QueueMode::Lifo` behavior is tested or documented as an explicit core-local limitation.
-- [ ] Status is polled under concurrent checkout/checkin, detach/take, close/drain, resize, retain, and injected create/recycle failures, with no panic/underflow and final exact recovery after load drains.
-- [ ] Managed create/recycle/hook failure paths leave the pool able to serve future checkouts.
-- [ ] Lifecycle methods remain available and documented as outside the steady-state lockfree guarantee.
+- [x] Core-local managed checkout/drop-return loops reuse objects without capacity loss.
+- [x] Cross-local return/reclamation behavior is tested for two local handles sharing capacity, including return to origin handle and release/detach when the origin handle is inactive.
+- [x] Managed `QueueMode::Fifo` and `QueueMode::Lifo` behavior is tested or documented as an explicit core-local limitation.
+- [x] Status is polled under concurrent checkout/checkin, detach/take, close/drain, resize, retain, and injected create/recycle failures, with no panic/underflow and final exact recovery after load drains.
+- [x] Managed create/recycle/hook failure paths leave the pool able to serve future checkouts.
+- [x] Lifecycle methods remain available and documented as outside the steady-state lockfree guarantee.
 
 ---
 

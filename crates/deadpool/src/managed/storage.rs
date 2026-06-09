@@ -3,6 +3,14 @@ use std::{
     sync::{Mutex, MutexGuard},
 };
 
+#[cfg(feature = "core-local")]
+use std::sync::{
+    Arc, Weak,
+    atomic::{AtomicUsize, Ordering},
+};
+
+#[cfg(feature = "core-local")]
+use crossbeam_queue::SegQueue;
 use tokio::sync::Semaphore;
 
 use crate::PoolMode;
@@ -38,16 +46,15 @@ impl From<PoolMode> for StorageMode {
 pub(crate) enum PoolStorage<T> {
     Shared(SharedStorage<T>),
     #[cfg(feature = "core-local")]
-    CoreLocal(SharedStorage<T>),
+    CoreLocal(CoreLocalStorage<T>),
 }
 
 impl<T> PoolStorage<T> {
     pub(crate) fn new(mode: PoolMode, max_size: usize) -> Self {
-        let storage = SharedStorage::new(max_size);
         match mode {
-            PoolMode::Shared => Self::Shared(storage),
+            PoolMode::Shared => Self::Shared(SharedStorage::new(max_size)),
             #[cfg(feature = "core-local")]
-            PoolMode::CoreLocal => Self::CoreLocal(storage),
+            PoolMode::CoreLocal => Self::CoreLocal(CoreLocalStorage::new(max_size)),
         }
     }
 
@@ -67,16 +74,69 @@ impl<T> PoolStorage<T> {
         self.shared().slots.lock().unwrap()
     }
 
-    pub(crate) const fn semaphore(&self) -> &Semaphore {
+    pub(crate) fn semaphore(&self) -> &Semaphore {
         &self.shared().semaphore
     }
 
-    const fn shared(&self) -> &SharedStorage<T> {
+    #[cfg(feature = "core-local")]
+    pub(crate) fn register_local(&self) -> Option<Arc<LocalStorage<T>>> {
+        match self {
+            Self::Shared(_) => None,
+            Self::CoreLocal(storage) => Some(storage.register_local()),
+        }
+    }
+
+    #[cfg(feature = "core-local")]
+    pub(crate) fn local_storages(&self) -> Vec<Arc<LocalStorage<T>>> {
+        match self {
+            Self::Shared(_) => Vec::new(),
+            Self::CoreLocal(storage) => storage.local_storages(),
+        }
+    }
+
+    fn shared(&self) -> &SharedStorage<T> {
         match self {
             Self::Shared(storage) => storage,
             #[cfg(feature = "core-local")]
-            Self::CoreLocal(storage) => storage,
+            Self::CoreLocal(storage) => &storage.shared,
         }
+    }
+}
+
+#[cfg(feature = "core-local")]
+#[derive(Debug)]
+pub(crate) struct CoreLocalStorage<T> {
+    shared: SharedStorage<T>,
+    locals: Mutex<Vec<Weak<LocalStorage<T>>>>,
+}
+
+#[cfg(feature = "core-local")]
+impl<T> CoreLocalStorage<T> {
+    fn new(max_size: usize) -> Self {
+        Self {
+            shared: SharedStorage::new(max_size),
+            locals: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn register_local(&self) -> Arc<LocalStorage<T>> {
+        let local = Arc::new(LocalStorage::default());
+        self.locals.lock().unwrap().push(Arc::downgrade(&local));
+        local
+    }
+
+    fn local_storages(&self) -> Vec<Arc<LocalStorage<T>>> {
+        let mut locals = self.locals.lock().unwrap();
+        let mut live = Vec::with_capacity(locals.len());
+        locals.retain(|local| {
+            if let Some(local) = local.upgrade() {
+                live.push(local);
+                true
+            } else {
+                false
+            }
+        });
+        live
     }
 }
 
@@ -104,4 +164,43 @@ pub(crate) struct Slots<T> {
     pub(crate) vec: VecDeque<T>,
     pub(crate) size: usize,
     pub(crate) max_size: usize,
+}
+
+#[cfg(feature = "core-local")]
+#[derive(Debug)]
+pub(crate) struct LocalStorage<T> {
+    queue: SegQueue<T>,
+    available: AtomicUsize,
+}
+
+#[cfg(feature = "core-local")]
+impl<T> Default for LocalStorage<T> {
+    fn default() -> Self {
+        Self {
+            queue: SegQueue::new(),
+            available: AtomicUsize::new(0),
+        }
+    }
+}
+
+#[cfg(feature = "core-local")]
+impl<T> LocalStorage<T> {
+    pub(crate) fn push(&self, value: T) {
+        self.queue.push(value);
+        let _ = self.available.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn pop(&self) -> Option<T> {
+        let value = self.queue.pop()?;
+        let _ = self.available.fetch_sub(1, Ordering::Relaxed);
+        Some(value)
+    }
+
+    pub(crate) fn drain(&self) -> Vec<T> {
+        let mut drained = Vec::new();
+        while let Some(value) = self.pop() {
+            drained.push(value);
+        }
+        drained
+    }
 }

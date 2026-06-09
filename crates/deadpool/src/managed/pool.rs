@@ -23,6 +23,11 @@ use crate::{
     },
 };
 
+#[cfg(feature = "core-local")]
+use crate::managed::storage::LocalStorage;
+#[cfg(feature = "core-local")]
+use std::sync::Weak as StdWeak;
+
 /// Generic object and connection pool.
 ///
 /// This struct can be cloned and transferred across thread boundaries and uses
@@ -94,7 +99,10 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
     #[cfg_attr(docsrs, doc(cfg(feature = "core-local")))]
     #[must_use]
     pub fn local(&self) -> LocalPool<M, W> {
-        LocalPool { pool: self.clone() }
+        LocalPool {
+            pool: self.clone(),
+            local: self.inner.storage.register_local(),
+        }
     }
 
     /// Retrieves an [`Object`] from this [`Pool`] or waits for one to
@@ -168,11 +176,95 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
         users_guard.disarm();
         permit.forget();
 
-        Ok(Object {
-            inner: Some(inner_obj),
-            pool: self.weak(),
+        Ok(self.wrap_object(inner_obj, None).into())
+    }
+
+    #[cfg(feature = "core-local")]
+    async fn timeout_get_for_local(
+        &self,
+        timeouts: &Timeouts,
+        local: &Arc<LocalStorage<ObjectInner<M>>>,
+    ) -> Result<W, PoolError<M::Error>> {
+        loop {
+            let Some(inner_obj) = local.pop() else {
+                return self
+                    .timeout_get_with_local_return(timeouts, Some(Arc::downgrade(local)))
+                    .await;
+            };
+            let _ = self.inner.users.fetch_add(1, Ordering::Relaxed);
+            let users_guard = DropGuard(|| {
+                let _ = self.inner.users.fetch_sub(1, Ordering::Relaxed);
+            });
+            if let Some(inner_obj) = self.try_recycle_local(timeouts, inner_obj).await? {
+                users_guard.disarm();
+                return Ok(self
+                    .wrap_object(inner_obj, Some(Arc::downgrade(local)))
+                    .into());
+            }
         }
-        .into())
+    }
+
+    #[cfg(feature = "core-local")]
+    async fn timeout_get_with_local_return(
+        &self,
+        timeouts: &Timeouts,
+        local: Option<StdWeak<LocalStorage<ObjectInner<M>>>>,
+    ) -> Result<W, PoolError<M::Error>> {
+        let _ = self.inner.users.fetch_add(1, Ordering::Relaxed);
+        let users_guard = DropGuard(|| {
+            let _ = self.inner.users.fetch_sub(1, Ordering::Relaxed);
+        });
+
+        let non_blocking = match timeouts.wait {
+            Some(t) => t.as_nanos() == 0,
+            None => false,
+        };
+
+        let permit = if non_blocking {
+            self.inner
+                .storage
+                .semaphore()
+                .try_acquire()
+                .map_err(|e| match e {
+                    TryAcquireError::Closed => PoolError::Closed,
+                    TryAcquireError::NoPermits => PoolError::Timeout(TimeoutType::Wait),
+                })?
+        } else {
+            apply_timeout(
+                self.inner.runtime,
+                TimeoutType::Wait,
+                timeouts.wait,
+                async {
+                    self.inner
+                        .storage
+                        .semaphore()
+                        .acquire()
+                        .await
+                        .map_err(|_| PoolError::Closed)
+                },
+            )
+            .await?
+        };
+
+        let inner_obj = loop {
+            let inner_obj = match self.inner.config.queue_mode {
+                QueueMode::Fifo => self.inner.storage.slots().vec.pop_front(),
+                QueueMode::Lifo => self.inner.storage.slots().vec.pop_back(),
+            };
+            let inner_obj = if let Some(inner_obj) = inner_obj {
+                self.try_recycle(timeouts, inner_obj).await?
+            } else {
+                self.try_create(timeouts).await?
+            };
+            if let Some(inner_obj) = inner_obj {
+                break inner_obj;
+            }
+        };
+
+        users_guard.disarm();
+        permit.forget();
+
+        Ok(self.wrap_object(inner_obj, local).into())
     }
 
     #[inline]
@@ -208,6 +300,48 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
         // Apply post_recycle hooks
         if let Err(_e) = self.inner.hooks.post_recycle.apply(inner).await {
             // TODO log post_recycle error
+            return Ok(None);
+        }
+
+        inner.metrics.recycle_count += 1;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            inner.metrics.recycled = Some(Instant::now());
+        }
+
+        Ok(Some(unready_obj.ready()))
+    }
+
+    #[cfg(feature = "core-local")]
+    #[inline]
+    async fn try_recycle_local(
+        &self,
+        timeouts: &Timeouts,
+        inner_obj: ObjectInner<M>,
+    ) -> Result<Option<ObjectInner<M>>, PoolError<M::Error>> {
+        let mut unready_obj = UnreadyLocalObject {
+            inner: Some(inner_obj),
+            pool: &self.inner,
+        };
+        let inner = unready_obj.inner();
+
+        if self.inner.hooks.pre_recycle.apply(inner).await.is_err() {
+            return Ok(None);
+        }
+
+        if apply_timeout(
+            self.inner.runtime,
+            TimeoutType::Recycle,
+            timeouts.recycle,
+            self.inner.manager.recycle(&mut inner.obj, &inner.metrics),
+        )
+        .await
+        .is_err()
+        {
+            return Ok(None);
+        }
+
+        if self.inner.hooks.post_recycle.apply(inner).await.is_err() {
             return Ok(None);
         }
 
@@ -270,6 +404,10 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
         let mut slots = self.inner.storage.slots();
         let old_max_size = slots.max_size;
         slots.max_size = max_size;
+        drop(slots);
+        #[cfg(feature = "core-local")]
+        self.inner.discard_local_objects_over_max_size();
+        let mut slots = self.inner.storage.slots();
         // shrink pool
         if max_size < old_max_size {
             while slots.size > slots.max_size {
@@ -339,9 +477,17 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
                 removed.push(obj.obj);
             }
         }
+        let retained = i;
         guard.size -= removed.len();
+        drop(guard);
+        #[cfg(feature = "core-local")]
+        let local_retained = self
+            .inner
+            .retain_local_objects(&mut predicate, &mut removed);
+        #[cfg(not(feature = "core-local"))]
+        let local_retained = 0;
         RetainResult {
-            retained: i,
+            retained: retained + local_retained,
             removed,
         }
     }
@@ -360,6 +506,8 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
     pub fn close(&self) {
         self.resize(0);
         self.inner.storage.semaphore().close();
+        #[cfg(feature = "core-local")]
+        self.inner.drain_local_objects();
     }
 
     /// Indicates whether this [`Pool`] has been closed.
@@ -396,6 +544,20 @@ impl<M: Manager, W: From<Object<M>>> Pool<M, W> {
         WeakPool {
             inner: Arc::downgrade(&self.inner),
             _wrapper: PhantomData,
+        }
+    }
+
+    fn wrap_object(
+        &self,
+        inner_obj: ObjectInner<M>,
+        #[cfg(feature = "core-local")] local: Option<StdWeak<LocalStorage<ObjectInner<M>>>>,
+        #[cfg(not(feature = "core-local"))] _local: Option<()>,
+    ) -> Object<M> {
+        Object {
+            inner: Some(inner_obj),
+            pool: self.weak(),
+            #[cfg(feature = "core-local")]
+            local,
         }
     }
 }
@@ -462,13 +624,15 @@ where
 
 /// Local handle for a managed [`Pool`].
 ///
-/// Local handles are the opt-in API surface for core-local storage. Phase 1
-/// keeps this handle delegating to the existing shared storage; later phases
-/// attach local idle ownership behind the same type.
+/// Local handles are the opt-in API surface for core-local storage. Successful
+/// same-handle returns are stored in the handle's local FIFO queue. The
+/// configured [`QueueMode`] continues to apply to objects retrieved from the
+/// shared fallback queue.
 #[cfg(feature = "core-local")]
 #[cfg_attr(docsrs, doc(cfg(feature = "core-local")))]
 pub struct LocalPool<M: Manager, W: From<Object<M>> = Object<M>> {
     pool: Pool<M, W>,
+    local: Option<Arc<LocalStorage<ObjectInner<M>>>>,
 }
 
 #[cfg(feature = "core-local")]
@@ -476,6 +640,19 @@ impl<M: Manager, W: From<Object<M>>> Clone for LocalPool<M, W> {
     fn clone(&self) -> Self {
         Self {
             pool: self.pool.clone(),
+            local: self.local.clone(),
+        }
+    }
+}
+
+#[cfg(feature = "core-local")]
+impl<M: Manager, W: From<Object<M>>> Drop for LocalPool<M, W> {
+    fn drop(&mut self) {
+        let Some(local) = &self.local else {
+            return;
+        };
+        if Arc::strong_count(local) == 1 {
+            self.pool.inner.drain_local_storage(local);
         }
     }
 }
@@ -490,6 +667,7 @@ where
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("LocalPool")
             .field("pool", &self.pool)
+            .field("local", &self.local)
             .finish()
     }
 }
@@ -516,7 +694,7 @@ impl<M: Manager, W: From<Object<M>>> LocalPool<M, W> {
     ///
     /// See [`PoolError`] for details.
     pub async fn get(&self) -> Result<W, PoolError<M::Error>> {
-        self.pool.get().await
+        self.timeout_get(&self.pool.timeouts()).await
     }
 
     /// Retrieves an [`Object`] from this local handle using custom timeouts.
@@ -527,7 +705,10 @@ impl<M: Manager, W: From<Object<M>>> LocalPool<M, W> {
     ///
     /// See [`PoolError`] for details.
     pub async fn timeout_get(&self, timeouts: &Timeouts) -> Result<W, PoolError<M::Error>> {
-        self.pool.timeout_get(timeouts).await
+        match &self.local {
+            Some(local) => self.pool.timeout_get_for_local(timeouts, local).await,
+            None => self.pool.timeout_get(timeouts).await,
+        }
     }
 
     /// Retrieves [`Status`] of the backing pool.
@@ -562,6 +743,111 @@ impl<M: Manager> PoolInner<M> {
         }
         self.manager.detach(obj);
     }
+
+    #[cfg(feature = "core-local")]
+    pub(crate) fn return_object_to_local(
+        &self,
+        local: &LocalStorage<ObjectInner<M>>,
+        inner: ObjectInner<M>,
+    ) {
+        let _ = self.users.fetch_sub(1, Ordering::Relaxed);
+        if self.storage.semaphore().is_closed() {
+            self.discard_idle_object(inner);
+            return;
+        }
+        let slots = self.storage.slots();
+        let keep = slots.size <= slots.max_size;
+        drop(slots);
+        if keep {
+            local.push(inner);
+        } else {
+            self.discard_idle_object(inner);
+        }
+    }
+
+    #[cfg(feature = "core-local")]
+    pub(crate) fn detach_object_inner(&self, inner: ObjectInner<M>) {
+        let _ = self.users.fetch_sub(1, Ordering::Relaxed);
+        self.discard_idle_object(inner);
+    }
+
+    #[cfg(feature = "core-local")]
+    fn drain_local_objects(&self) {
+        for local in self.storage.local_storages() {
+            self.drain_local_storage(&local);
+        }
+    }
+
+    #[cfg(feature = "core-local")]
+    fn drain_local_storage(&self, local: &LocalStorage<ObjectInner<M>>) {
+        for inner in local.drain() {
+            self.discard_idle_object(inner);
+        }
+    }
+
+    #[cfg(feature = "core-local")]
+    fn discard_local_objects_over_max_size(&self) {
+        for local in self.storage.local_storages() {
+            loop {
+                let over_max_size = {
+                    let slots = self.storage.slots();
+                    slots.size > slots.max_size
+                };
+                if !over_max_size {
+                    break;
+                }
+                let Some(inner) = local.pop() else {
+                    break;
+                };
+                self.discard_idle_object(inner);
+            }
+        }
+    }
+
+    #[cfg(feature = "core-local")]
+    fn retain_local_objects(
+        &self,
+        predicate: &mut impl FnMut(&M::Type, Metrics) -> bool,
+        removed: &mut Vec<M::Type>,
+    ) -> usize {
+        let mut retained = 0;
+        for local in self.storage.local_storages() {
+            let mut keep = Vec::new();
+            for mut inner in local.drain() {
+                if predicate(&inner.obj, inner.metrics) {
+                    retained += 1;
+                    keep.push(inner);
+                } else {
+                    let mut slots = self.storage.slots();
+                    let add_permit =
+                        !self.storage.semaphore().is_closed() && slots.size <= slots.max_size;
+                    slots.size -= 1;
+                    drop(slots);
+                    if add_permit {
+                        self.storage.semaphore().add_permits(1);
+                    }
+                    self.manager.detach(&mut inner.obj);
+                    removed.push(inner.obj);
+                }
+            }
+            for inner in keep {
+                local.push(inner);
+            }
+        }
+        retained
+    }
+
+    #[cfg(feature = "core-local")]
+    fn discard_idle_object(&self, mut inner: ObjectInner<M>) {
+        let mut slots = self.storage.slots();
+        let add_permit = !self.storage.semaphore().is_closed() && slots.size <= slots.max_size;
+        slots.size -= 1;
+        drop(slots);
+        if add_permit {
+            self.storage.semaphore().add_permits(1);
+        }
+        self.manager.detach(&mut inner.obj);
+    }
 }
 
 struct UnreadyObject<'a, M: Manager> {
@@ -583,6 +869,31 @@ impl<M: Manager> Drop for UnreadyObject<'_, M> {
         if let Some(mut inner) = self.inner.take() {
             self.pool.storage.slots().size -= 1;
             self.pool.manager.detach(&mut inner.obj);
+        }
+    }
+}
+
+#[cfg(feature = "core-local")]
+struct UnreadyLocalObject<'a, M: Manager> {
+    inner: Option<ObjectInner<M>>,
+    pool: &'a PoolInner<M>,
+}
+
+#[cfg(feature = "core-local")]
+impl<M: Manager> UnreadyLocalObject<'_, M> {
+    fn ready(mut self) -> ObjectInner<M> {
+        self.inner.take().unwrap()
+    }
+    fn inner(&mut self) -> &mut ObjectInner<M> {
+        self.inner.as_mut().unwrap()
+    }
+}
+
+#[cfg(feature = "core-local")]
+impl<M: Manager> Drop for UnreadyLocalObject<'_, M> {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            self.pool.discard_idle_object(inner);
         }
     }
 }

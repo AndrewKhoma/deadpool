@@ -140,7 +140,7 @@ jobs:
           PG__PASSWORD: deadpool
           PG__PORT: 5432
           PG__USER: deadpool
-        run: cargo test --features serde,rt_tokio_1,rt_async-std_1
+        run: cargo test --features serde,core-local,rt_tokio_1,rt_async-std_1
 name: deadpool-postgres
 "on":
   pull_request:

@@ -234,6 +234,14 @@ async fn core_local_cached_statement_lifecycle() {
     assert_eq!(client.statement_cache.size(), 0);
     client.prepare_cached("SELECT 1;").await.unwrap();
     assert_eq!(client.statement_cache.size(), 1);
+    assert!(client.statement_cache.remove("SELECT 1;", &[]).is_some());
+    assert_eq!(client.statement_cache.size(), 0);
+    client.prepare_cached("SELECT 1;").await.unwrap();
+    assert_eq!(client.statement_cache.size(), 1);
+    pool.manager().statement_caches.remove("SELECT 1;", &[]);
+    assert_eq!(client.statement_cache.size(), 0);
+    client.prepare_cached("SELECT 1;").await.unwrap();
+    assert_eq!(client.statement_cache.size(), 1);
     client.statement_cache.clear();
     assert_eq!(client.statement_cache.size(), 0);
 }
@@ -254,6 +262,52 @@ async fn core_local_clean_and_custom_recycling_methods() {
             assert_eq!(value, 3);
         }
     }
+}
+
+#[cfg(feature = "core-local")]
+#[tokio::test]
+async fn core_local_detach_and_failed_transaction_recover() {
+    let pool = create_core_local_pool(RecyclingMethod::Fast);
+    let local = pool.local();
+
+    let client = local.get().await.unwrap();
+    let wrapper = deadpool_postgres::Object::take(client);
+    drop(wrapper);
+    assert_eq!(pool.status().size, 0);
+
+    let mut client = local.get().await.unwrap();
+    let txn = client.transaction().await.unwrap();
+    assert!(
+        txn.query("SELECT * FROM definitely_missing_table", &[])
+            .await
+            .is_err()
+    );
+    drop(txn);
+    drop(client);
+
+    let client = local.get().await.unwrap();
+    let rows = client.query("SELECT 1", &[]).await.unwrap();
+    let value: i32 = rows[0].get(0);
+    assert_eq!(value, 1);
+}
+
+#[cfg(feature = "core-local")]
+#[tokio::test]
+async fn core_local_clean_recycling_resets_dirty_session_state() {
+    let pool = create_core_local_pool(RecyclingMethod::Clean);
+    let local = pool.local();
+
+    let client = local.get().await.unwrap();
+    client
+        .batch_execute("SET application_name = 'deadpool_core_local_dirty';")
+        .await
+        .unwrap();
+    drop(client);
+
+    let client = local.get().await.unwrap();
+    let rows = client.query("SHOW application_name", &[]).await.unwrap();
+    let value: String = rows[0].get(0);
+    assert_ne!(value, "deadpool_core_local_dirty");
 }
 
 struct Env {
